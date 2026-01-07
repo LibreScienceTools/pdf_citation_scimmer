@@ -1,0 +1,21 @@
+# PDF Processing
+PyMuPDF>=1.23.0
+pypdf>=3.17.0
+
+# API Clients
+requests>=2.31.0
+habanero>=1.2.6
+
+# Export Formats
+bibtexparser>=1.4.0
+
+# CLI
+click>=8.1.7
+tqdm>=4.66.0
+
+# Utilities
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+
+# Optional: For future GROBID integration
+# grobid-client-python>=0.0.5

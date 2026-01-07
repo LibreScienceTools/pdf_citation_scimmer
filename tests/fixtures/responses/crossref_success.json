@@ -1,0 +1,33 @@
+{
+  "status": "ok",
+  "message-type": "work",
+  "message-version": "1.0.0",
+  "message": {
+    "DOI": "10.1234/test.2023.001",
+    "type": "journal-article",
+    "title": ["Deep Learning for Natural Language Processing"],
+    "author": [
+      {
+        "given": "John",
+        "family": "Smith",
+        "sequence": "first"
+      },
+      {
+        "given": "Jane",
+        "family": "Doe",
+        "sequence": "additional"
+      }
+    ],
+    "container-title": ["Journal of Machine Learning Research"],
+    "published-print": {
+      "date-parts": [[2023, 3, 15]]
+    },
+    "volume": "24",
+    "issue": "3",
+    "page": "123-145",
+    "publisher": "JMLR.org",
+    "ISSN": ["1532-4435"],
+    "URL": "https://jmlr.org/papers/v24/23-001.html",
+    "abstract": "This paper presents a novel approach to natural language processing using deep learning techniques."
+  }
+}

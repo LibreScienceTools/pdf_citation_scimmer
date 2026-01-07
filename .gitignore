@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+
+# Virtual environments
+.env
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Project specific
+output/
+.cache/
+*.bib
+*.ris
+test_pdfs/
+test_library/
+*.bat
+*.ps1
+
+# PyInstaller
+build/
+dist/
+
+# Logs and coverage
+*.log
+.coverage
+
+# Claude settings
+.claude/
+# OS
+.DS_Store
+Thumbs.db

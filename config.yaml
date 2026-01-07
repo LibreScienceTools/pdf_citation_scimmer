@@ -1,0 +1,32 @@
+# PDF Citation Extractor Configuration
+
+# Email for CrossRef API (polite pool - faster response)
+# Leave empty for public pool
+crossref_email: ""
+
+# Output settings
+default_output_format: "bibtex"  # bibtex, ris, json
+output_directory: "./output"
+
+# Extraction settings
+extraction:
+  # Number of pages to scan for DOI
+  doi_scan_pages: 3
+
+  # Fallback strategy order
+  strategy:
+    - "embedded_metadata"
+    - "doi_lookup"
+    - "grobid"  # Requires GROBID Docker service running
+
+# GROBID service configuration
+grobid_url: "http://localhost:8070"
+
+# DOI Patterns (most common)
+doi_patterns:
+  - "10\\.\\d{4,9}/[-._;()/:A-Z0-9]+"
+
+# Cache settings (future feature)
+cache:
+  enabled: false
+  directory: "./.cache"
