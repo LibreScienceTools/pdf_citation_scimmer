@@ -35,7 +35,7 @@ test_library/
 
 # PyInstaller
 build/
-dist/
+
 
 # Logs and coverage
 *.log
@@ -43,6 +43,8 @@ dist/
 
 # Claude settings
 .claude/
+
+
 # OS
 .DS_Store
 Thumbs.db
