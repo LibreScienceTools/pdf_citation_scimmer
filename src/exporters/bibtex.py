@@ -75,6 +75,12 @@ class BibTeXExporter:
 
         # Generate citation key
         citation_key = self._generate_citation_key(metadata)
+        
+        # Prepend group name to citation key if present
+        if metadata.get("group"):
+            # Sanitize group name for BibTeX key (replace spaces and special chars)
+            group_prefix = metadata["group"].replace(" ", "_").replace("-", "_")
+            citation_key = f"{group_prefix}_{citation_key}"
 
         # Build entry
         entry = {
