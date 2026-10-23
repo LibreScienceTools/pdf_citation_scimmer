@@ -266,3 +266,202 @@ class TestBibTeXExporter:
 
         entry = exporter._create_bibtex_entry(metadata)
         assert entry["author"] == "John Smith and Jane Doe and Bob Johnson"
+
+    def test_group_field_in_entry(self):
+        """Test that group field is added to BibTeX entry."""
+        exporter = BibTeXExporter()
+        metadata = {
+            "author": "John Smith",
+            "title": "Test Paper",
+            "year": "2023",
+            "group": "MachineLearning",
+        }
+
+        entry = exporter._create_bibtex_entry(metadata)
+        assert entry.get("groups") == "MachineLearning"
+
+    def test_group_prefix_in_citation_key(self):
+        """Test that group name is prepended to citation key."""
+        exporter = BibTeXExporter()
+        metadata = {
+            "author": "John Smith",
+            "title": "Deep Learning",
+            "year": "2023",
+            "group": "MachineLearning",
+        }
+
+        entry = exporter._create_bibtex_entry(metadata)
+        assert entry["ID"].startswith("MachineLearning_")
+
+    def test_group_prefix_sanitizes_spaces(self):
+        """Test that group name with spaces is sanitized for citation key."""
+        exporter = BibTeXExporter()
+        metadata = {
+            "author": "John Smith",
+            "title": "Test Paper",
+            "year": "2023",
+            "group": "Machine Learning",
+        }
+
+        entry = exporter._create_bibtex_entry(metadata)
+        assert entry["ID"].startswith("Machine_Learning_")
+        assert entry.get("groups") == "Machine Learning"
+
+    def test_group_prefix_sanitizes_hyphens(self):
+        """Test that group name with hyphens is sanitized for citation key."""
+        exporter = BibTeXExporter()
+        metadata = {
+            "author": "John Smith",
+            "title": "Test Paper",
+            "year": "2023",
+            "group": "Machine-Learning",
+        }
+
+        entry = exporter._create_bibtex_entry(metadata)
+        assert entry["ID"].startswith("Machine_Learning_")
+        assert entry.get("groups") == "Machine-Learning"
+
+    def test_generate_jabref_group_metadata_no_groups(self):
+        """Test JabRef metadata generation with no groups."""
+        exporter = BibTeXExporter()
+        citations = [
+            {"author": "John Smith", "title": "Test Paper", "year": "2023"},
+            {"author": "Jane Doe", "title": "Another Paper", "year": "2022"},
+        ]
+        result = exporter._generate_jabref_group_metadata(citations)
+        assert result == ""
+
+    def test_generate_jabref_group_metadata_single_group(self):
+        """Test JabRef metadata generation with a single group."""
+        exporter = BibTeXExporter()
+        citations = [
+            {"author": "John Smith", "title": "Test Paper", "year": "2023", "group": "MachineLearning", "group_depth": 1},
+        ]
+        result = exporter._generate_jabref_group_metadata(citations)
+        assert "@Comment{jabref-meta: databaseType:bibtex;}" in result
+        assert "@Comment{jabref-meta: grouping:" in result
+        assert "0 AllEntriesGroup:;" in result
+        assert "1 StaticGroup:MachineLearning\\;0x8a8a8aff\\;\\;\\;;" in result
+
+    def test_generate_jabref_group_metadata_multiple_groups(self):
+        """Test JabRef metadata generation with multiple groups at same depth."""
+        exporter = BibTeXExporter()
+        citations = [
+            {"author": "John Smith", "title": "Paper 1", "year": "2023", "group": "MachineLearning", "group_depth": 1},
+            {"author": "Jane Doe", "title": "Paper 2", "year": "2022", "group": "DeepLearning", "group_depth": 1},
+        ]
+        result = exporter._generate_jabref_group_metadata(citations)
+        assert "@Comment{jabref-meta: databaseType:bibtex;}" in result
+        assert "0 AllEntriesGroup:;" in result
+        # Groups at same depth should have same index
+        assert "1 StaticGroup:DeepLearning\\;0x8a8a8aff\\;\\;\\;;" in result
+        assert "1 StaticGroup:MachineLearning\\;0x8a8a8aff\\;\\;\\;;" in result
+
+    def test_generate_jabref_group_metadata_duplicate_groups(self):
+        """Test JabRef metadata generation deduplicates groups."""
+        exporter = BibTeXExporter()
+        citations = [
+            {"author": "John Smith", "title": "Paper 1", "year": "2023", "group": "MachineLearning", "group_depth": 1},
+            {"author": "Jane Doe", "title": "Paper 2", "year": "2022", "group": "MachineLearning", "group_depth": 1},
+            {"author": "Bob Jones", "title": "Paper 3", "year": "2021", "group": "MachineLearning", "group_depth": 1},
+        ]
+        result = exporter._generate_jabref_group_metadata(citations)
+        # Should only have one group entry, not three
+        assert result.count("StaticGroup:MachineLearning") == 1
+        assert "0 AllEntriesGroup:;" in result
+        assert "1 StaticGroup:MachineLearning\\;0x8a8a8aff\\;\\;\\;;" in result
+
+    def test_export_contains_jabref_metadata(self, tmp_path):
+        """Test that exported file contains JabRef metadata."""
+        exporter = BibTeXExporter()
+        citations = [
+            {"author": "John Smith", "title": "Test Paper", "year": "2023", "group": "MachineLearning", "group_depth": 1},
+        ]
+        output_file = tmp_path / "test.bib"
+        result = exporter.export(citations, output_file)
+        
+        assert result is True
+        content = output_file.read_text()
+        assert "@Comment{jabref-meta: databaseType:bibtex;}" in content
+        assert "@Comment{jabref-meta: grouping:" in content
+        assert "StaticGroup:MachineLearning" in content
+
+    def test_export_single_contains_jabref_metadata(self):
+        """Test that single export contains JabRef metadata."""
+        exporter = BibTeXExporter()
+        metadata = {
+            "author": "John Smith",
+            "title": "Test Paper",
+            "year": "2023",
+            "group": "MachineLearning",
+            "group_depth": 1,
+        }
+        result = exporter.export_single(metadata)
+        assert "@Comment{jabref-meta: databaseType:bibtex;}" in result
+        assert "@Comment{jabref-meta: grouping:" in result
+        assert "StaticGroup:MachineLearning" in result
+        # Also verify groups field still exists
+        assert "groups = {MachineLearning}" in result
+
+    def test_export_no_groups_no_jabref_metadata(self, tmp_path):
+        """Test that export without groups doesn't add JabRef metadata."""
+        exporter = BibTeXExporter()
+        citations = [
+            {"author": "John Smith", "title": "Test Paper", "year": "2023"},
+        ]
+        output_file = tmp_path / "test.bib"
+        result = exporter.export(citations, output_file)
+        
+        assert result is True
+        content = output_file.read_text()
+        # Should not have JabRef metadata when no groups
+        assert "@Comment{jabref-meta:" not in content
+
+    def test_generate_jabref_group_metadata_with_depths(self):
+        """Test JabRef metadata generation with groups at different depths."""
+        exporter = BibTeXExporter()
+        citations = [
+            {"author": "John Smith", "title": "Paper 1", "year": "2023", "group": "test", "group_depth": 1},
+            {"author": "Jane Doe", "title": "Paper 2", "year": "2022", "group": "sub", "group_depth": 2},
+            {"author": "Bob Jones", "title": "Paper 3", "year": "2021", "group": "other", "group_depth": 1},
+        ]
+        result = exporter._generate_jabref_group_metadata(citations)
+        assert "@Comment{jabref-meta: databaseType:bibtex;}" in result
+        assert "@Comment{jabref-meta: grouping:" in result
+        assert "0 AllEntriesGroup:;" in result
+        # Both "other" and "test" should be at depth 1
+        assert "1 StaticGroup:other\\;0x8a8a8aff\\;\\;\\;;" in result
+        assert "1 StaticGroup:test\\;0x8a8a8aff\\;\\;\\;;" in result
+        # "sub" should be at depth 2
+        assert "2 StaticGroup:sub\\;0x8a8a8aff\\;\\;\\;;" in result
+
+    def test_generate_jabref_group_metadata_default_depth(self):
+        """Test that group_depth defaults to 1 when not provided."""
+        exporter = BibTeXExporter()
+        citations = [
+            {"author": "John Smith", "title": "Test Paper", "year": "2023", "group": "MachineLearning"},
+        ]
+        result = exporter._generate_jabref_group_metadata(citations)
+        assert "@Comment{jabref-meta: databaseType:bibtex;}" in result
+        assert "0 AllEntriesGroup:;" in result
+        # Should default to depth 1
+        assert "1 StaticGroup:MachineLearning\\;0x8a8a8aff\\;\\;\\;;" in result
+
+    def test_generate_jabref_group_metadata_mixed_depths(self):
+        """Test JabRef metadata generation with groups at various depths."""
+        exporter = BibTeXExporter()
+        citations = [
+            {"author": "John Smith", "title": "Paper 1", "year": "2023", "group": "root", "group_depth": 1},
+            {"author": "Jane Doe", "title": "Paper 2", "year": "2022", "group": "level2", "group_depth": 2},
+            {"author": "Bob Jones", "title": "Paper 3", "year": "2021", "group": "level3", "group_depth": 3},
+            {"author": "Alice Brown", "title": "Paper 4", "year": "2020", "group": "another", "group_depth": 1},
+        ]
+        result = exporter._generate_jabref_group_metadata(citations)
+        assert "0 AllEntriesGroup:;" in result
+        # Groups at depth 1
+        assert "1 StaticGroup:another\\;0x8a8a8aff\\;\\;\\;;" in result
+        assert "1 StaticGroup:root\\;0x8a8a8aff\\;\\;\\;;" in result
+        # Group at depth 2
+        assert "2 StaticGroup:level2\\;0x8a8a8aff\\;\\;\\;;" in result
+        # Group at depth 3
+        assert "3 StaticGroup:level3\\;0x8a8a8aff\\;\\;\\;;" in result

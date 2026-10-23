@@ -50,7 +50,15 @@ class BibTeXExporter:
             writer.indent = "  "
             writer.order_entries_by = ("ID", "author", "title")
 
+            # Generate JabRef group metadata
+            jabref_metadata = self._generate_jabref_group_metadata(citations)
+
             with open(output_path, "w", encoding="utf-8") as bibfile:
+                # Write JabRef metadata first
+                if jabref_metadata:
+                    bibfile.write(jabref_metadata)
+                    bibfile.write("\n")
+                # Write BibTeX entries
                 bibfile.write(writer.write(db))
 
             logger.info(f"Exported {len(db.entries)} citations to {output_path}")
@@ -103,6 +111,7 @@ class BibTeXExporter:
             "abstract": "abstract",
             "issn": "issn",
             "isbn": "isbn",
+            "group": "groups",
         }
 
         for meta_field, bib_field in field_mapping.items():
@@ -195,6 +204,49 @@ class BibTeXExporter:
 
         return cleaned
 
+    def _generate_jabref_group_metadata(self, citations: List[Dict]) -> str:
+        """
+        Generate JabRef group metadata as @Comment entries.
+
+        JabRef stores groups as special @Comment entries in the BibTeX file.
+        This allows JabRef to display native groups in its UI.
+
+        Args:
+            citations: List of citation metadata dictionaries
+
+        Returns:
+            String containing JabRef group metadata, or empty string if no groups
+        """
+        # Extract unique group names with their depth from citations
+        groups_with_depth = {}
+        for citation in citations:
+            if citation.get("group"):
+                group_name = citation["group"]
+                group_depth = citation.get("group_depth", 1)  # Default to 1 if not provided
+                # Use group name as key, store depth
+                if group_name not in groups_with_depth:
+                    groups_with_depth[group_name] = group_depth
+
+        if not groups_with_depth:
+            # No groups to export
+            return ""
+
+        # Sort groups by depth first, then by name for consistent output
+        sorted_groups = sorted(groups_with_depth.items(), key=lambda x: (x[1], x[0]))
+        
+        # Build the grouping metadata
+        grouping_lines = ["0 AllEntriesGroup:;"]
+        
+        for group_name, depth in sorted_groups:
+            # Escape backslashes for BibTeX
+            escaped_group = group_name.replace("\\", "\\\\")
+            # Use depth as the index (level)
+            grouping_lines.append(f"{depth} StaticGroup:{escaped_group}\\;0\\;1\\;0x8a8a8aff\\;\\;\\;;")
+
+        grouping_content = "\n".join(grouping_lines)
+        metadata = f"@Comment{{jabref-meta: databaseType:bibtex;}}\n\n@Comment{{jabref-meta: grouping:\n{grouping_content}\n}}"
+        return metadata
+
     def export_single(self, metadata: Dict) -> str:
         """
         Export a single citation to BibTeX string.
@@ -212,4 +264,12 @@ class BibTeXExporter:
         writer = BibTexWriter()
         writer.indent = "  "
 
-        return writer.write(db)
+        # Generate JabRef group metadata for single entry
+        jabref_metadata = self._generate_jabref_group_metadata([metadata])
+
+        # Combine metadata and BibTeX entries
+        result = writer.write(db)
+        if jabref_metadata:
+            result = jabref_metadata + "\n" + result
+
+        return result

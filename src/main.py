@@ -207,6 +207,14 @@ class CitationExtractor:
             db = BibDatabase()
             db.entries = []
 
+            # Collect all citations for JabRef metadata generation
+            all_citations = []
+            for group_name, group_citations in citations.items():
+                all_citations.extend(group_citations)
+            
+            # Generate JabRef group metadata
+            jabref_metadata = self.bibtex_exporter._generate_jabref_group_metadata(all_citations)
+
             # Export each group
             group_names = list(citations.keys())
             for group_name, group_citations in citations.items():
@@ -226,6 +234,12 @@ class CitationExtractor:
             
             # Now add group comments manually
             output_lines = []
+            
+            # Add JabRef metadata at the beginning if it exists
+            if jabref_metadata:
+                output_lines.append(jabref_metadata)
+                output_lines.append("")
+            
             current_group = None
             
             for group_name, group_citations in citations.items():
