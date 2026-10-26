@@ -189,83 +189,96 @@ class CitationExtractor:
 
         return grouped_citations
 
-    def _export_to_bibtex(self, citations: Dict[str, List[Dict]], output_path: Path) -> bool:
+    def _export_to_bibtex(self, citations: Dict[str, List[Dict]], output_path: Path, overwrite: bool = False) -> bool:
         """
         Export grouped citations to BibTeX file with group comments.
+        By default, merges with existing file to avoid overwriting entries.
 
         Args:
             citations: Dictionary mapping group names to lists of citation metadata
             output_path: Path to output .bib file
+            overwrite: If True, overwrite existing file. If False (default), merge with existing.
 
         Returns:
             True if successful, False otherwise
         """
+        import bibtexparser
         from bibtexparser.bibdatabase import BibDatabase
         from bibtexparser.bwriter import BibTexWriter
 
         try:
-            db = BibDatabase()
-            db.entries = []
-
-            # Collect all citations for JabRef metadata generation
-            all_citations = []
-            for group_name, group_citations in citations.items():
-                all_citations.extend(group_citations)
+            # Step 1: Read existing file if it exists and we're not overwriting
+            existing_entries = {}  # Dict[citation_key, entry_dict]
+            existing_content = ""
             
-            # Generate JabRef group metadata
-            jabref_metadata = self.bibtex_exporter._generate_jabref_group_metadata(all_citations)
-
-            # Export each group
-            group_names = list(citations.keys())
+            if not overwrite and output_path.exists():
+                with open(output_path, "r", encoding="utf-8") as f:
+                    existing_content = f.read()
+                
+                # Parse existing BibTeX file
+                try:
+                    existing_db = bibtexparser.loads(existing_content)
+                    existing_entries = {entry["ID"]: entry for entry in existing_db.entries}
+                    logger.info(f"Found {len(existing_entries)} existing entries in {output_path}")
+                except Exception as e:
+                    logger.warning(f"Could not parse existing BibTeX file, starting fresh: {e}")
+                    existing_entries = {}
+            
+            # Step 2: Build all entries (new + existing)
+            all_entries = dict(existing_entries)  # Start with existing
+            new_count = 0
+            
             for group_name, group_citations in citations.items():
-                # Add all citations in this group
                 for citation in group_citations:
                     entry = self.bibtex_exporter._create_bibtex_entry(citation)
                     if entry:
-                        db.entries.append(entry)
-
-            # Write to file
+                        entry_id = entry["ID"]
+                        if entry_id in all_entries:
+                            # Entry already exists, skip it
+                            logger.debug(f"Skipping duplicate entry: {entry_id}")
+                        else:
+                            # New entry
+                            all_entries[entry_id] = entry
+                            new_count += 1
+            
+            # Step 3: Generate JabRef metadata
+            all_citation_data = []
+            for group_name, group_citations in citations.items():
+                all_citation_data.extend(group_citations)
+            
+            jabref_metadata = self.bibtex_exporter._generate_jabref_group_metadata(all_citation_data)
+            
+            # If we kept existing entries, try to preserve their JabRef metadata
+            if existing_content and not overwrite:
+                existing_jabref = self.bibtex_exporter._extract_existing_jabref_metadata(existing_content)
+                if existing_jabref and not jabref_metadata:
+                    jabref_metadata = existing_jabref
+            
+            # Step 4: Write to file - Option 1: Write all entries together
             writer = BibTexWriter()
             writer.indent = "  "
             writer.order_entries_by = ("ID", "author", "title")
-
-            # Get the BibTeX string
-            bibtex_str = writer.write(db)
             
-            # Now add group comments manually
-            output_lines = []
+            # Build final database with ALL entries (existing + new)
+            db = BibDatabase()
+            db.entries = list(all_entries.values())
             
-            # Add JabRef metadata at the beginning if it exists
-            if jabref_metadata:
-                output_lines.append(jabref_metadata)
-                output_lines.append("")
-            
-            current_group = None
-            
-            for group_name, group_citations in citations.items():
-                # Add group header comment
-                output_lines.append(f"% ===== Group: {group_name} =====")
-                output_lines.append("")
-                
-                # Get entries for this group and add them
-                # We need to extract the entries that belong to this group
-                for citation in group_citations:
-                    entry = self.bibtex_exporter._create_bibtex_entry(citation)
-                    if entry:
-                        # Write this single entry
-                        single_db = BibDatabase()
-                        single_db.entries = [entry]
-                        entry_str = writer.write(single_db).strip()
-                        output_lines.append(entry_str)
-                        output_lines.append("")  # Blank line after each entry
-                
-                output_lines.append("")  # Blank line between groups
-            
-            # Write the final output
+            # Write everything to file
             with open(output_path, "w", encoding="utf-8") as bibfile:
-                bibfile.write("\n".join(output_lines))
+                # Write JabRef metadata first
+                if jabref_metadata:
+                    bibfile.write(jabref_metadata)
+                    bibfile.write("\n")
+                
+                # Add group comments for the new citation groups
+                for group_name, group_citations in citations.items():
+                    if group_citations:  # Only add group header if there are citations
+                        bibfile.write(f"% ===== Group: {group_name} =====\n\n")
+                
+                # Write all entries (existing + new)
+                bibfile.write(writer.write(db))
 
-            logger.info(f"Exported to {output_path}")
+            logger.info(f"Exported to {output_path} ({new_count} new entries, {len(existing_entries)} existing preserved)")
             return True
 
         except Exception as e:
@@ -273,7 +286,8 @@ class CitationExtractor:
             return False
 
     def export_citations(
-        self, citations: Dict[str, List[Dict]], output_path: Path, format: str = "bibtex"
+        self, citations: Dict[str, List[Dict]], output_path: Path, 
+        format: str = "bibtex", overwrite: bool = False
     ) -> bool:
         """
         Export citations to file.
@@ -282,12 +296,13 @@ class CitationExtractor:
             citations: Dictionary mapping group names to lists of citation metadata
             output_path: Output file path
             format: Export format (currently only 'bibtex' supported)
+            overwrite: If True, overwrite existing file. If False (default), merge with existing.
 
         Returns:
             True if successful
         """
         if format == "bibtex":
-            return self._export_to_bibtex(citations, output_path)
+            return self._export_to_bibtex(citations, output_path, overwrite)
         else:
             logger.error(f"Unsupported export format: {format}")
             return False
@@ -337,6 +352,12 @@ class CitationExtractor:
     is_flag=True,
     help="Enable verbose logging",
 )
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    default=False,
+    help="Overwrite existing .bib file instead of merging (default: merge with existing)",
+)
 def main(
     directory: Optional[Path],
     pdf_file: Optional[Path],
@@ -344,6 +365,7 @@ def main(
     output_format: str,
     config_path: Optional[Path],
     verbose: bool,
+    overwrite: bool,
 ):
     """
     PDF Citation Metadata Extractor
@@ -405,7 +427,7 @@ def main(
         # Create output directory if needed
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        success = extractor.export_citations(citations, output_path, output_format)
+        success = extractor.export_citations(citations, output_path, output_format, overwrite)
 
         if success:
             # Count total citations across all groups
