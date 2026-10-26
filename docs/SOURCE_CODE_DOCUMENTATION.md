@@ -87,6 +87,7 @@ src/
 - `crossref_client` (CrossRefClient): Client for CrossRef API
 - `bibtex_exporter` (BibTeXExporter): Exporter for BibTeX format
 - `grobid_client` (GROBIDClient, optional): Client for GROBID service
+- `_last_failed_files` (List[Dict]): Tracks files that failed extraction in the last run
 
 **Methods:**
 
@@ -148,53 +149,173 @@ Process a single PDF file through all extraction strategies.
 - `pdf_path`: Path to PDF file
 
 **Returns:**
-- Citation metadata dictionary or None if extraction failed
+- `Dict`: Citation metadata dictionary on success
+- `Dict`: Failure dictionary with `"_failed": True` on extraction failure (includes error details and fallback citation key)
+- `None`: Only in unexpected error cases (rare)
 
 **Strategy Order:**
 1. Extract embedded metadata from PDF
 2. Extract DOI and query CrossRef
 3. Use GROBID if enabled and previous strategies failed
+4. On failure: Generate fallback citation key from filename
+
+**Failure Dictionary Structure:**
+```python
+{
+    "_failed": True,
+    "pdf_path": str,       # Full path to the PDF file
+    "error": str,         # Reason for extraction failure
+    "would_be_key": str   # Fallback citation key for manual entry creation
+}
+```
 
 **Example:**
 ```python
-metadata = extractor.process_pdf(Path("paper.pdf"))
+result = extractor.process_pdf(Path("paper.pdf"))
+
+if result and not result.get("_failed"):
+    # Success - process metadata
+    print(f"Title: {result['title']}")
+nelif result and result.get("_failed"):
+    # Failed - handle error
+    print(f"Error: {result['error']}")
+    print(f"Suggested key: {result['would_be_key']}")
 ```
 
 ---
 
 ```python
-def process_directory(self, directory: Path) -> List[Dict]
+def process_directory(self, directory: Path) -> Dict[str, List[Dict]]
 ```
-Process all PDF files in a directory.
+Process all PDF files in a directory and its subdirectories.
 
 **Parameters:**
 - `directory`: Directory containing PDF files
 
 **Returns:**
-- List of citation metadata dictionaries
+- `Dict[str, List[Dict]]`: Dictionary mapping group names to lists of citation metadata
+  - Group names are derived from subdirectory names
+  - Files in the root directory are grouped under "General"
+  - Failed files are stored in `self._last_failed_files` (not in the return value)
 
 **Features:**
-- Scans directory for `.pdf` files
+- Scans directory recursively for `.pdf` files
 - Displays progress bar using tqdm
 - Logs successful and failed extractions
-- Returns aggregated results
+- Returns grouped citations (only successful extractions)
+- Tracks failed files with detailed error information for later logging
+
+**Failure Tracking:**
+Failed extractions are stored in `self._last_failed_files` as a list of dictionaries with:
+- `path`: Full path to the failed PDF
+- `relative_path`: Path relative to the input directory
+- `group`: Group name the file would belong to
+- `error`: Reason for failure
+- `would_be_key`: Fallback citation key for manual JabRef entry creation
 
 ---
 
 ```python
-def export_citations(self, citations: List[Dict], 
+def export_citations(self, citations: Dict[str, List[Dict]], 
                      output_path: Path, 
-                     format: str = "bibtex") -> bool
+                     format: str = "bibtex",
+                     overwrite: bool = False) -> bool
 ```
-Export citations to file.
+Export citations to file with merge support.
 
 **Parameters:**
-- `citations`: List of citation metadata dictionaries
+- `citations`: Dictionary mapping group names to lists of citation metadata
 - `output_path`: Output file path
 - `format`: Export format (default: "bibtex")
+- `overwrite`: If True, overwrite existing file. If False (default), merge with existing entries.
 
 **Returns:**
 - True if successful, False otherwise
+
+**Merge Behavior (overwrite=False):**
+When merge mode is enabled (default):
+- Reads existing `.bib` file if it exists
+- Parses all existing entries and preserves them
+- Adds only new, non-duplicate entries based on citation keys
+- Maintains JabRef group metadata from existing file
+- Writes all entries (existing + new) to the output file
+
+**Overwrite Behavior (overwrite=True):**
+When overwrite is True:
+- Creates a fresh file
+- All existing entries are discarded
+- Only new citations are written to the file
+
+---
+
+```python
+def _generate_fallback_citation_key(self, pdf_path: Path) -> str
+```
+Generate a fallback citation key from PDF filename when extraction fails.
+
+**Purpose:** Creates a valid BibTeX key that can be used to identify the PDF in JabRef when automatic extraction fails.
+
+**Parameters:**
+- `pdf_path`: Path to the PDF file
+
+**Returns:**
+- `str`: BibTeX-compatible citation key
+
+**Algorithm:**
+1. Extracts the filename stem (without extension)
+2. Attempts to extract year from filename using regex pattern `(19|20)\d{2}`
+3. Cleans special characters (replaces with underscores)
+4. Returns format: `{CleanStem}_{YearOrYYYY}`
+
+**Example:**
+```python
+key = extractor._generate_fallback_citation_key(Path("Smith_2023_DeepLearning.pdf"))
+# Returns: "Smith_2023_DeepLearning_2023"
+
+key = extractor._generate_fallback_citation_key(Path("paper.pdf"))
+# Returns: "paper_YYYY"
+```
+
+---
+
+```python
+def _write_failed_files_log(self, failed_files: List[Dict], output_path: Path) -> None
+```
+Write a detailed log of failed extractions for manual JabRef entry creation.
+
+**Purpose:** Helps users identify which PDFs failed extraction and provides information needed to manually create entries in JabRef.
+
+**Parameters:**
+- `failed_files`: List of failure dictionaries (from `_last_failed_files`)
+- `output_path`: Path to the output .bib file
+
+**Log File Location:**
+- If `output_path.parent` exists (not current directory): uses that as log directory
+- Otherwise: uses `config.output_directory` (default: `./output`)
+- Log filename: `failed_extractions.log`
+
+**Log File Contents:**
+- Timestamp of extraction
+- Output file reference
+- JabRef usage instructions
+- Total count of failed files
+- For each failed file:
+  - Relative path
+  - Group name (for JabRef organization)
+  - Would-be citation key (for BibTeX ID)
+  - Error reason
+  - Suggested action
+
+**Failure Dictionary Structure:**
+```python
+{
+    "path": "/full/path/to/file.pdf",
+    "relative_path": "subdir/file.pdf",
+    "group": "subdir",
+    "error": "No DOI found",
+    "would_be_key": "file_YYYY"
+}
+```
 
 ---
 
@@ -992,15 +1113,16 @@ If no config file is found, the following defaults are used:
                               │
               ┌───────────────┴───────────────┐
               ▼                               ▼
-       Success (metadata)              Failed (None/exception)
+       Success (metadata)              Failed (failure dict)
               │                               │
               ▼                               ▼
-    Add to citations list        Add to failed_files list
+    Add to citations list        Add to _last_failed_files
               │                               │
               └─────────────┬─────────────────┘
                             ▼
               ┌───────────────────────────────────────┐
               │  Display summary: successful vs failed   │
+              │  (Write failed_extractions.log later)    │
               └───────────────────────────────────────┘
 ```
 
@@ -1046,9 +1168,37 @@ The application uses a fallback strategy:
 
 If one strategy fails, the next is tried automatically.
 
-### 4. None Handling
+### 4. Failure Tracking and Logging
 
-All methods return `None` or empty structures rather than raising exceptions for expected failures:
+**Enhanced Error Handling:** The application now tracks detailed failure information to help users manually fix issues.
+
+#### Failure Dictionary Structure
+When extraction fails, methods return a failure dictionary instead of None:
+
+```python
+# process_pdf() on failure returns:
+{
+    "_failed": True,
+    "pdf_path": "/path/to/file.pdf",
+    "error": "No metadata extracted from any source",
+    "would_be_key": "file_YYYY"
+}
+```
+
+#### Failed Files Log
+The `_write_failed_files_log()` method creates a comprehensive log file (`failed_extractions.log`) in the output directory with:
+- Timestamp and output file reference
+- JabRef-specific instructions for manual entry creation
+- List of all failed files with would-be citation keys
+
+This allows users to:
+1. Identify which PDFs need manual attention
+2. Create JabRef entries with the correct citation keys
+3. Organize entries into the correct groups
+
+### 5. None Handling (Legacy)
+
+Most methods return `None` or empty structures rather than raising exceptions for expected failures:
 
 ```python
 # DOIExtractor

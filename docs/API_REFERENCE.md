@@ -61,9 +61,11 @@ Process a single PDF file and extract citation metadata.
 - `pdf_path` (Path): Path to the PDF file
 
 **Returns:**
-- `Optional[Dict]`: Citation metadata dictionary, or None if extraction failed
+- `Dict`: Citation metadata dictionary on success
+- `Dict` with `"_failed": True` on extraction failure (includes error details)
+- `None`: Only in unexpected error cases (rare)
 
-**Metadata Structure:**
+**Metadata Structure (Success):**
 ```python
 {
     "title": str | None,
@@ -85,37 +87,56 @@ Process a single PDF file and extract citation metadata.
 }
 ```
 
+**Failure Structure:**
+```python
+{
+    "_failed": True,
+    "pdf_path": str,  # Full path to the PDF file
+    "error": str,     # Reason for failure
+    "would_be_key": str  # Suggested citation key for manual entry
+}
+```
+
 **Example:**
 ```python
 from pathlib import Path
 from src.main import CitationExtractor
 
 extractor = CitationExtractor()
-metadata = extractor.process_pdf(Path("paper.pdf"))
+result = extractor.process_pdf(Path("paper.pdf"))
 
-if metadata:
-    print(f"Title: {metadata['title']}")
-    print(f"Authors: {metadata['author']}")
-    print(f"Year: {metadata['year']}")
+if result and not result.get("_failed"):
+    # Success
+    print(f"Title: {result['title']}")
+    print(f"Authors: {result['author']}")
+    print(f"Year: {result['year']}")
+elif result and result.get("_failed"):
+    # Failed - handle the error
+    print(f"Failed to extract: {result['error']}")
+    print(f"Suggested citation key: {result['would_be_key']}")
 ```
 
 ---
 
-##### `process_directory(directory: Path) -> List[Dict]`
+##### `process_directory(directory: Path) -> Dict[str, List[Dict]]`
 
-Process all PDF files in a directory.
+Process all PDF files in a directory and its subdirectories.
 
 **Parameters:**
 - `directory` (Path): Directory containing PDF files
 
 **Returns:**
-- `List[Dict]`: List of citation metadata dictionaries (one per successful extraction)
+- `Dict[str, List[Dict]]`: Dictionary mapping group names to lists of citation metadata
+  - Groups are based on subdirectory names
+  - Files in root directory are grouped under "General"
+  - Failed extractions are stored in `extractor._last_failed_files`
 
 **Behavior:**
-- Scans directory for files with `.pdf` extension
+- Scans directory recursively for files with `.pdf` extension
 - Displays progress bar using tqdm
 - Logs successful and failed extractions
-- Returns only successful extractions
+- Returns grouped citations (only successful extractions)
+- Failed files are tracked and can be accessed via `_last_failed_files` attribute
 
 **Example:**
 ```python
@@ -125,27 +146,48 @@ from src.main import CitationExtractor
 extractor = CitationExtractor()
 citations = extractor.process_directory(Path("./papers"))
 
-print(f"Successfully extracted {len(citations)} citations")
-for citation in citations:
-    print(f"- {citation['pdf_file']}: {citation.get('title', 'No title')}")
+print(f"Successfully extracted {sum(len(c) for c in citations.values())} citations")
+for group_name, group_citations in citations.items():
+    print(f"\n{group_name}:")
+    for citation in group_citations:
+        print(f"  - {citation['pdf_file']}: {citation.get('title', 'No title')}")
+
+# Access failed files if any
+if extractor._last_failed_files:
+    print(f"\nFailed: {len(extractor._last_failed_files)} files")
+    for failure in extractor._last_failed_files:
+        print(f"  - {failure['relative_path']}: {failure['error']}")
 ```
 
 ---
 
-##### `export_citations(citations: List[Dict], output_path: Path, format: str = "bibtex") -> bool`
+##### `export_citations(citations: Dict[str, List[Dict]], output_path: Path, format: str = "bibtex", overwrite: bool = False) -> bool`
 
 Export citations to a file.
 
 **Parameters:**
-- `citations` (List[Dict]): List of citation metadata dictionaries
+- `citations` (Dict[str, List[Dict]]): Dictionary mapping group names to lists of citation metadata
 - `output_path` (Path): Path to output file
 - `format` (str): Export format (default: "bibtex")
+- `overwrite` (bool): If True, overwrite existing file. If False (default), merge with existing entries.
 
 **Returns:**
 - `bool`: True if export successful, False otherwise
 
 **Supported Formats:**
 - `"bibtex"`: BibTeX format (currently the only supported format)
+
+**Merge Behavior (overwrite=False):**
+- Reads existing `.bib` file if it exists
+- Preserves all existing entries
+- Adds only new, non-duplicate entries
+- Duplicates are detected by citation keys
+- JabRef group metadata is preserved
+
+**Overwrite Behavior (overwrite=True):**
+- Replaces the entire output file
+- All existing entries are lost
+- Creates a fresh `.bib` file with only the new citations
 
 **Example:**
 ```python
@@ -164,6 +206,83 @@ success = extractor.export_citations(
 
 if success:
     print("Export successful!")
+```
+
+---
+
+##### `_generate_fallback_citation_key(pdf_path: Path) -> str`
+
+Generate a fallback citation key from PDF path when metadata extraction fails.
+
+**Parameters:**
+- `pdf_path` (Path): Path to the PDF file
+
+**Returns:**
+- `str`: A valid BibTeX citation key based on the filename
+
+**Key Generation:**
+- Extracts the filename stem (without extension)
+- Attempts to extract year from filename (patterns: `19xx`, `20xx`)
+- Cleans special characters for BibTeX compatibility
+- Format: `{CleanStem}_{YearOrYYYY}`
+
+**Example:**
+```python
+from pathlib import Path
+from src.main import CitationExtractor
+
+extractor = CitationExtractor()
+key = extractor._generate_fallback_citation_key(Path("Smith_2023_DeepLearning.pdf"))
+# Returns: "Smith_2023_DeepLearning_2023"
+
+key = extractor._generate_fallback_citation_key(Path("paper.pdf"))
+# Returns: "paper_YYYY" (no year found in filename)
+```
+
+##### `_write_failed_files_log(failed_files: List[Dict], output_path: Path) -> None`
+
+Write a detailed log file of failed extractions.
+
+**Parameters:**
+- `failed_files` (List[Dict]): List of failure dictionaries from `_last_failed_files`
+- `output_path` (Path): Path to the output .bib file (log written to same directory)
+
+**Behavior:**
+- Creates `failed_extractions.log` in the output directory
+- Log file location:
+  - If `output_path` has a parent directory: uses that directory
+  - Otherwise: uses `config.output_directory` (default: `./output`)
+- Log format includes JabRef-specific instructions
+- Each failure entry includes: file path, group, would-be citation key, error reason
+
+**Failure Dictionary Structure:**
+```python
+{
+    "path": str,           # Full path to the PDF
+    "relative_path": str,  # Path relative to input directory
+    "group": str,          # Group name (subdirectory or "General")
+    "error": str,          # Reason for failure
+    "would_be_key": str    # Suggested BibTeX key for manual entry
+}
+```
+
+**Example:**
+```python
+from pathlib import Path
+from src.main import CitationExtractor
+
+extractor = CitationExtractor()
+failed = [
+    {
+        "path": "/papers/smith.pdf",
+        "relative_path": "smith.pdf",
+        "group": "General",
+        "error": "No DOI found",
+        "would_be_key": "smith_YYYY"
+    }
+]
+extractor._write_failed_files_log(failed, Path("output/refs.bib"))
+# Creates: output/failed_extractions.log
 ```
 
 ---

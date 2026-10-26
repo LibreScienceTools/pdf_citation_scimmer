@@ -202,6 +202,15 @@ ls ./papers/*.pdf
 **Solution:** The PDF may not have embedded metadata or a visible DOI. Try:
 - Enable GROBID in your strategy list
 - Manually add the DOI to the PDF if you know it
+- Check `failed_extractions.log` in your output directory for details on which files failed
+
+**Note:** When extraction fails, a log file `failed_extractions.log` is automatically created in your output directory. This file contains:
+- List of all failed PDFs
+- Their would-be citation keys (for JabRef)
+- Group information
+- Failure reasons
+
+Use this log to manually create entries in JabRef using the citation keys provided.
 
 #### Issue: GROBID service not available
 **Solution:** Start the GROBID Docker container:
@@ -221,7 +230,9 @@ crossref_email: "your.email@example.com"
 pip install -r requirements.txt
 ```
 
-### Log File
+### Log Files
+
+#### Main Application Log
 
 All operations are logged to `pdf_citation_extractor.log`. Check this file for detailed error messages.
 
@@ -232,6 +243,46 @@ tail -f pdf_citation_extractor.log
 # Filter for errors
 grep -i error pdf_citation_extractor.log
 ```
+
+#### Failed Extractions Log
+
+When PDF metadata extraction fails, a detailed log file `failed_extractions.log` is automatically created in your output directory. This file helps you manually add missing citations to JabRef.
+
+```bash
+# Check for failed extractions
+cat output/failed_extractions.log
+
+# Or in your specified output directory
+cat my_output/failed_extractions.log
+```
+
+**Log File Contents:**
+- Timestamp of extraction
+- Output file reference
+- JabRef usage instructions
+- List of all failed files with:
+  - File path (relative to input directory)
+  - Group name (for JabRef organization)
+  - Would-be citation key (use this as the BibTeX key in JabRef)
+  - Failure reason
+  - Suggested action
+
+**Example Log Entry:**
+```
+## Failed File #1
+- **File**: papers/Conference2024/smith_paper.pdf
+- **Group**: Conference2024
+- **Would-be Citation Key**: smith_2024_Paper
+- **Reason**: No DOI found, no embedded metadata, GROBID unavailable
+- **Action**: Create entry manually in JabRef with key 'smith_2024_Paper'
+```
+
+**How to Use with JabRef:**
+1. Open your `.bib` file in JabRef
+2. For each failed file in the log, create a new entry
+3. Use the "Would-be Citation Key" as the entry's BibTeX key (ID field)
+4. Add the entry to the specified "Group"
+5. Save your `.bib` file
 
 ---
 
@@ -249,12 +300,20 @@ mkdir -p ~/Documents/Research/Papers
 
 Process new papers as you download them:
 ```bash
-# Add a new paper and process it
-python -m src.main --pdf new_paper.pdf --output new_paper.bib
+# Default behavior: automatically merges with existing file
+python -m src.main --pdf new_paper.pdf --output library.bib
 
-# Append to your main bibliography
-cat new_paper.bib >> library.bib
+# The new citation will be added to library.bib without duplicates
+# No need to manually append!
 ```
+
+**Note:** By default, the extractor uses **merge mode**, which:
+- Preserves all existing entries in your `.bib` file
+- Only adds new citations
+- Prevents duplicates based on citation keys
+- Maintains JabRef group metadata
+
+To force overwrite (old behavior), use the `--overwrite` flag.
 
 ### 3. Backup Your Config
 
@@ -306,6 +365,7 @@ Options:
   -f, --format TEXT       Output format (default: bibtex)
   -c, --config PATH       Path to config.yaml file
   -v, --verbose            Enable verbose logging
+  --overwrite             Overwrite existing .bib file (default: merge with existing)
   --help                  Show this message and exit.
 ```
 
@@ -316,8 +376,11 @@ You must specify **either** `--dir` **or** `--pdf`, but not both.
 ### Examples
 
 ```bash
-# Process a directory
+# Process a directory (default: merge with existing file)
 python -m src.main -d ./papers -o references.bib
+
+# Process a directory and overwrite existing file
+python -m src.main -d ./papers -o references.bib --overwrite
 
 # Process a single file
 python -m src.main -p paper.pdf -o paper.bib
@@ -327,6 +390,9 @@ python -m src.main -d ./papers -c my_config.yaml
 
 # Verbose mode
 python -m src.main -d ./papers -o refs.bib -v
+
+# Process to a specific output directory
+python -m src.main -d ./papers -o output/references.bib
 ```
 
 ---
