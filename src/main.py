@@ -3,8 +3,10 @@
 import click
 import yaml
 import logging
+import datetime
+import re
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from tqdm import tqdm
 
 from src.extractors import PDFMetadataExtractor, DOIExtractor, GROBIDClient
@@ -52,6 +54,85 @@ class CitationExtractor:
             self.grobid_client = GROBIDClient(grobid_url=grobid_url)
         else:
             self.grobid_client = None
+        
+        # Track failed files for logging
+        self._last_failed_files = []
+
+    def _generate_fallback_citation_key(self, pdf_path: Path) -> str:
+        """
+        Generate a fallback citation key from PDF path when metadata extraction fails.
+        This helps identify the file in JabRef later.
+        
+        Format: {CleanFileStem}_{YearOrYYYY}
+        
+        Args:
+            pdf_path: Path to the PDF file
+            
+        Returns:
+            A valid BibTeX citation key
+        """
+        # Get the stem (filename without extension)
+        stem = pdf_path.stem
+        
+        # Try to extract year from filename
+        year_match = re.search(r'\b(19|20)\d{2}\b', stem)
+        year = year_match.group() if year_match else "YYYY"
+        
+        # Clean for BibTeX (remove special chars, replace spaces)
+        clean_stem = re.sub(r'[^a-zA-Z0-9]', '_', stem)
+        clean_stem = clean_stem.strip('_')
+        
+        # Build citation key
+        citation_key = f"{clean_stem}_{year}"
+        
+        # Ensure it's not empty
+        if not citation_key or citation_key == "_":
+            citation_key = f"UNKNOWN_{year}"
+        
+        return citation_key
+
+    def _write_failed_files_log(self, failed_files: List[Dict], output_path: Path) -> None:
+        """
+        Write a detailed log file of failed extractions to help with manual JabRef entry creation.
+        
+        Args:
+            failed_files: List of failure dictionaries with keys: path, relative_path, group, error, would_be_key
+            output_path: Path to the output .bib file (we write log in same directory)
+        """
+        if not failed_files:
+            return
+        
+        # Determine log file location
+        if output_path.parent != Path("."):
+            # output_path has a directory component
+            log_dir = output_path.parent
+        else:
+            # Use default output directory from config
+            log_dir = Path(self.config.get("output_directory", "./output"))
+        
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "failed_extractions.log"
+        
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write("# PDF Citation Extraction - Failed Files\n")
+            f.write(f"# Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"# Output file: {output_path.name}\n")
+            f.write("#\n")
+            f.write("# How to use this file with JabRef:\n")
+            f.write("#   1. Open your .bib file in JabRef\n")
+            f.write("#   2. For each failed file below, manually create an entry\n")
+            f.write("#   3. Use the 'Would-be Citation Key' as the entry's BibTeX key\n")
+            f.write("#   4. Add the entry to the specified 'Group'\n")
+            f.write("#\n")
+            f.write(f"# Total failed: {len(failed_files)}\n\n")
+            
+            for i, failure in enumerate(failed_files, 1):
+                f.write(f"## Failed File #{i}\n")
+                f.write(f"- **File**: {failure['relative_path']}\n")
+                f.write(f"- **Group**: {failure['group']}\n")
+                f.write(f"- **Would-be Citation Key**: {failure['would_be_key']}\n")
+                f.write(f"- **Reason**: {failure['error']}\n")
+                f.write(f"- **Action**: Create entry manually in JabRef with key '{failure['would_be_key']}'\n\n")
 
     def _load_config(self, config_path: Optional[Path]) -> Dict:
         """Load configuration from YAML file."""
@@ -117,9 +198,16 @@ class CitationExtractor:
             grobid_metadata = self.grobid_client.process(pdf_path)
             if grobid_metadata:
                 return grobid_metadata
-
+        
+        # All strategies failed - return failure info with fallback citation key
+        fallback_key = self._generate_fallback_citation_key(pdf_path)
         logger.warning(f"Could not extract sufficient metadata from {pdf_path.name}")
-        return None
+        return {
+            "_failed": True,
+            "pdf_path": str(pdf_path),
+            "error": "No metadata extracted from any source (no DOI, no embedded metadata, GROBID unavailable)",
+            "would_be_key": fallback_key
+        }
 
     def process_directory(self, directory: Path) -> Dict[str, List[Dict]]:
         """
@@ -144,7 +232,10 @@ class CitationExtractor:
 
         # Group citations by parent directory
         grouped_citations: Dict[str, List[Dict]] = {}
-        failed_files = []
+        failed_files = []  # List of dicts with failure details
+        
+        # Clear previous failed files
+        self._last_failed_files = []
 
         # Process each PDF with progress bar
         for pdf_path in tqdm(pdf_files, desc="Processing PDFs", unit="file"):
@@ -159,9 +250,11 @@ class CitationExtractor:
                     group_name = relative_path.parent.name
                 
                 # Process the PDF
-                metadata = self.process_pdf(pdf_path)
-                if metadata:
-                    # Add group information to metadata
+                result = self.process_pdf(pdf_path)
+                
+                if result and not result.get("_failed"):
+                    # Success - add group information to metadata
+                    metadata = result
                     metadata["group"] = group_name
                     metadata["group_path"] = str(relative_path.parent)
                     
@@ -169,11 +262,45 @@ class CitationExtractor:
                     if group_name not in grouped_citations:
                         grouped_citations[group_name] = []
                     grouped_citations[group_name].append(metadata)
+                elif result and result.get("_failed"):
+                    # Failed with details from process_pdf
+                    failure = {
+                        "path": str(pdf_path),
+                        "relative_path": str(relative_path),
+                        "group": group_name,
+                        "error": result.get("error", "Unknown error"),
+                        "would_be_key": result.get("would_be_key", "UNKNOWN")
+                    }
+                    failed_files.append(failure)
+                    self._last_failed_files.append(failure)
+                    logger.warning(f"Failed: {pdf_path.name} - {failure['error']}")
                 else:
-                    failed_files.append(str(pdf_path))
+                    # Should not happen, but handle it
+                    failure = {
+                        "path": str(pdf_path),
+                        "relative_path": str(relative_path),
+                        "group": group_name,
+                        "error": "Unexpected: process_pdf returned None",
+                        "would_be_key": self._generate_fallback_citation_key(pdf_path)
+                    }
+                    failed_files.append(failure)
+                    self._last_failed_files.append(failure)
+                    logger.warning(f"Failed: {pdf_path.name} - Unexpected error")
+                    
             except Exception as e:
+                # Unexpected error during processing
+                relative_path = pdf_path.relative_to(directory)
+                group_name = "General" if relative_path.parent == Path(".") else relative_path.parent.name
+                failure = {
+                    "path": str(pdf_path),
+                    "relative_path": str(relative_path),
+                    "group": group_name,
+                    "error": str(e),
+                    "would_be_key": self._generate_fallback_citation_key(pdf_path)
+                }
+                failed_files.append(failure)
+                self._last_failed_files.append(failure)
                 logger.error(f"Error processing {pdf_path.name}: {e}")
-                failed_files.append(str(pdf_path))
 
         # Summary
         total_success = sum(len(c) for c in grouped_citations.values())
@@ -181,7 +308,8 @@ class CitationExtractor:
             f"\nProcessing complete: {total_success} successful, {len(failed_files)} failed"
         )
         if failed_files:
-            logger.warning(f"Failed files: {', '.join(failed_files[:5])}{'...' if len(failed_files) > 5 else ''}")
+            failed_paths = [f["relative_path"] for f in failed_files]
+            logger.warning(f"Failed files: {', '.join(failed_paths[:5])}{'...' if len(failed_paths) > 5 else ''}")
 
         # If we have no citations at all, return empty "General" group
         if not grouped_citations:
@@ -401,13 +529,31 @@ def main(
     extractor = CitationExtractor(config_path)
 
     # Process PDFs
+    failed_files = []  # Track failed files for single PDF processing
+    
     if pdf_file:
         click.echo(f"\nProcessing single PDF: {pdf_file.name}")
-        metadata = extractor.process_pdf(pdf_file)
-        if metadata:
+        result = extractor.process_pdf(pdf_file)
+        if result and not result.get("_failed"):
+            # Success
+            metadata = result
             # Wrap single citation in "General" group
             citations = {"General": [metadata]}
+        elif result and result.get("_failed"):
+            # Failed - track it
+            failure = {
+                "path": str(pdf_file),
+                "relative_path": pdf_file.name,
+                "group": "General",
+                "error": result.get("error", "Unknown error"),
+                "would_be_key": result.get("would_be_key", "UNKNOWN")
+            }
+            failed_files.append(failure)
+            extractor._last_failed_files = failed_files
+            click.echo(f"Failed to extract metadata from {pdf_file.name}: {failure['error']}", err=True)
+            raise click.Abort()
         else:
+            # Unexpected None
             click.echo(f"Failed to extract metadata from {pdf_file.name}", err=True)
             raise click.Abort()
 
@@ -418,6 +564,9 @@ def main(
         # Check if we have any citations at all
         if not any(citations.values()):
             click.echo("\nNo citations extracted. Check the log for details.", err=True)
+            # Write failed files log even if all failed
+            if extractor._last_failed_files:
+                extractor._write_failed_files_log(extractor._last_failed_files, output_path)
             raise click.Abort()
 
     # Export results
@@ -430,6 +579,10 @@ def main(
         success = extractor.export_citations(citations, output_path, output_format, overwrite)
 
         if success:
+            # Write failed files log if any failures occurred
+            if extractor._last_failed_files:
+                extractor._write_failed_files_log(extractor._last_failed_files, output_path)
+                click.echo(f"Failed files log: {output_path.parent / 'failed_extractions.log'}")
             # Count total citations across all groups
             total_count = sum(len(c) for c in citations.values())
             group_count = len(citations)
