@@ -25,6 +25,39 @@ class BibTeXExporter:
             "dissertation": "phdthesis",
         }
 
+    def _extract_existing_jabref_metadata(self, content: str) -> str:
+        """
+        Extract JabRef metadata comments from existing BibTeX file content.
+        
+        Args:
+            content: The raw content of the .bib file
+            
+        Returns:
+            String containing JabRef metadata comments, or empty string if none found
+        """
+        lines = content.split('\n')
+        jabref_lines = []
+        in_jabref_meta = False
+        
+        for line in lines:
+            stripped = line.strip()
+            
+            # Check if this is a JabRef metadata comment
+            if stripped.startswith('@Comment{jabref-meta:'):
+                in_jabref_meta = True
+                jabref_lines.append(line)
+            elif in_jabref_meta:
+                # Continue collecting until we hit a non-comment line or end of metadata
+                if stripped.startswith('@Comment') or stripped == '':
+                    jabref_lines.append(line)
+                elif stripped.startswith('@') and not stripped.startswith('@Comment'):
+                    # End of metadata section, start of actual entries
+                    break
+                else:
+                    jabref_lines.append(line)
+        
+        return '\n'.join(jabref_lines)
+
     def export(self, citations: List[Dict], output_path: Path) -> bool:
         """
         Export citations to BibTeX file.
