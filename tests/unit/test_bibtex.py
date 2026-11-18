@@ -244,7 +244,6 @@ class TestBibTeXExporter:
             "publisher": "Publisher",
             "doi": "10.1234/test",
             "url": "https://example.com",
-            "abstract": "Abstract text",
             "issn": "1234-5678",
             "isbn": "978-1234567890",
         }

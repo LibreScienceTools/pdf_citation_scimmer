@@ -131,9 +131,6 @@ def sample_grobid_xml_response() -> str:
             </sourceDesc>
         </fileDesc>
         <profileDesc>
-            <abstract>
-                <p>This paper presents a comprehensive study of deep learning techniques for natural language processing tasks.</p>
-            </abstract>
         </profileDesc>
     </teiHeader>
 </TEI>"""
@@ -148,7 +145,6 @@ def sample_grobid_metadata() -> Dict:
         "year": "2023",
         "journal": "Journal of Machine Learning Research",
         "doi": "10.1234/test.2023.001",
-        "abstract": "This paper presents a comprehensive study of deep learning techniques for natural language processing tasks.",
         "source": "grobid",
     }
 

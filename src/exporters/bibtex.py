@@ -114,14 +114,8 @@ class BibTeXExporter:
         # Determine entry type
         entry_type = self._get_entry_type(metadata.get("type"))
 
-        # Generate citation key
+        # Generate citation key (without group prefix to keep it clean)
         citation_key = self._generate_citation_key(metadata)
-        
-        # Prepend group name to citation key if present
-        if metadata.get("group"):
-            # Sanitize group name for BibTeX key (replace spaces and special chars)
-            group_prefix = metadata["group"].replace(" ", "_").replace("-", "_")
-            citation_key = f"{group_prefix}_{citation_key}"
 
         # Build entry
         entry = {
@@ -141,7 +135,6 @@ class BibTeXExporter:
             "publisher": "publisher",
             "doi": "doi",
             "url": "url",
-            "abstract": "abstract",
             "issn": "issn",
             "isbn": "isbn",
             "group": "groups",
@@ -150,6 +143,10 @@ class BibTeXExporter:
         for meta_field, bib_field in field_mapping.items():
             if metadata.get(meta_field):
                 entry[bib_field] = str(metadata[meta_field])
+
+        # Add UUID field if present (for file tracking)
+        if metadata.get("pdf_uuid"):
+            entry["pdf_uuid"] = metadata["pdf_uuid"]
 
         # Clean up the entry
         entry = self._clean_entry(entry)
@@ -173,18 +170,18 @@ class BibTeXExporter:
 
     def _generate_citation_key(self, metadata: Dict) -> str:
         """
-        Generate a citation key from metadata.
+        Generate a base citation key from metadata.
 
-        Format: FirstAuthorLastName_Year_FirstTitleWord
-        If author is unknown, uses more of the title to avoid duplicates.
-        If title-based key is not unique enough (e.g., PII-only titles),
-        falls back to using the PDF filename.
+        Format: FirstAuthorLastNameYear (no underscore)
+        
+        Note: Uniqueness (adding 'a', 'b', etc.) is handled at a higher level
+        in the merge logic, not here.
 
         Args:
             metadata: Citation metadata
 
         Returns:
-            Citation key string
+            Base citation key string (may need suffix added for uniqueness)
         """
         # Extract first author's last name
         author_part = "Unknown"
@@ -199,74 +196,13 @@ class BibTeXExporter:
         # Extract year
         year_part = metadata.get("year", "YYYY")
 
-        # Extract title part for citation key
-        title_part = "NoTitle"
-        use_pdf_filename = False
+        # Build base citation key (no underscore)
+        base_key = f"{author_part}{year_part}"
         
-        if metadata.get("title"):
-            title = metadata["title"]
-            # If author is Unknown, use more of the title to avoid duplicates
-            if author_part == "Unknown":
-                # Clean the entire title and use first several words
-                # Remove special characters and split into words
-                cleaned_title = re.sub(r"[^a-zA-Z0-9]", " ", title)
-                title_words = cleaned_title.split()
-                # Use first 5 significant words (filtering out common articles and identifiers)
-                significant_words = []
-                for word in title_words:
-                    if word and word.lower() not in ["a", "an", "the", "pii", "s", "doi", "pp", "vol", "no"]:
-                        significant_words.append(word)
-                        if len(significant_words) >= 5:
-                            break
-                if significant_words:
-                    title_part = "_".join(significant_words[:5])
-                    # Check if we only have numeric identifiers (like PII numbers)
-                    # If so, this won't be unique enough, use PDF filename instead
-                    if all(word.isdigit() for word in significant_words):
-                        use_pdf_filename = True
-                else:
-                    title_part = "NoTitle"
-                    use_pdf_filename = True
-            else:
-                # Use first significant word from title
-                title_words = title.split()
-                for word in title_words:
-                    cleaned_word = re.sub(r"[^a-zA-Z0-9]", "", word)
-                    if cleaned_word and cleaned_word.lower() not in ["a", "an", "the"]:
-                        title_part = cleaned_word
-                        break
-        else:
-            # No title at all
-            use_pdf_filename = True
-
-        # If we need to use PDF filename (title-based key not good enough)
-        if use_pdf_filename and metadata.get("pdf_file"):
-            pdf_filename = metadata["pdf_file"]
-            # Extract stem without extension
-            pdf_stem = Path(pdf_filename).stem
-            # Extract meaningful parts from filename
-            # Remove common patterns like (year), -, and clean up
-            cleaned_stem = re.sub(r"[^a-zA-Z0-9]", " ", pdf_stem)
-            # Split and take first few meaningful words
-            stem_words = cleaned_stem.split()
-            significant_words = []
-            for word in stem_words:
-                if word and word.lower() not in ["a", "an", "the", "and", "pdf", "pii", "doi", "s"]:
-                    significant_words.append(word)
-                    if len(significant_words) >= 4:
-                        break
-            if significant_words:
-                title_part = "_".join(significant_words[:4])
-            else:
-                title_part = "NoTitle"
-
-        # Combine parts
-        citation_key = f"{author_part}_{year_part}_{title_part}"
-
         # Clean the key (remove special characters)
-        citation_key = re.sub(r"[^a-zA-Z0-9_]", "", citation_key)
-
-        return citation_key
+        base_key = re.sub(r"[^a-zA-Z0-9_]", "", base_key)
+        
+        return base_key
 
     def _clean_entry(self, entry: Dict) -> Dict:
         """

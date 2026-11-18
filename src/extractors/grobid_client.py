@@ -151,14 +151,6 @@ class GROBIDClient:
             if doi_elem is not None and doi_elem.text:
                 metadata["doi"] = doi_elem.text.strip()
 
-            # Extract abstract
-            abstract_elem = root.find(".//tei:abstract", self.TEI_NS)
-            if abstract_elem is not None:
-                # Get all text content from abstract
-                abstract_text = "".join(abstract_elem.itertext()).strip()
-                if abstract_text:
-                    metadata["abstract"] = abstract_text
-
             # Only return metadata if we got at least a title
             if "title" in metadata:
                 logger.debug(f"Extracted metadata: {metadata}")

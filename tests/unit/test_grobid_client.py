@@ -350,31 +350,6 @@ class TestGROBIDClient:
         assert metadata["year"] == "2022"
 
     @patch("requests.get")
-    def test_parse_tei_xml_with_abstract(self, mock_get):
-        """Test parsing abstract from XML."""
-        mock_get.return_value.status_code = 200
-
-        xml = """<?xml version="1.0" encoding="UTF-8"?>
-        <TEI xmlns="http://www.tei-c.org/ns/1.0">
-            <teiHeader>
-                <fileDesc>
-                    <titleStmt><title>Test Paper</title></titleStmt>
-                </fileDesc>
-                <profileDesc>
-                    <abstract>
-                        <p>This is the abstract text.</p>
-                    </abstract>
-                </profileDesc>
-            </teiHeader>
-        </TEI>"""
-
-        client = GROBIDClient()
-        metadata = client._parse_tei_xml(xml)
-
-        assert "abstract" in metadata
-        assert "This is the abstract text." in metadata["abstract"]
-
-    @patch("requests.get")
     def test_parse_tei_xml_with_doi(self, mock_get):
         """Test parsing DOI from XML."""
         mock_get.return_value.status_code = 200

@@ -12,6 +12,7 @@ from tqdm import tqdm
 from src.extractors import PDFMetadataExtractor, DOIExtractor, GROBIDClient
 from src.api_clients import CrossRefClient
 from src.exporters import BibTeXExporter
+from src.trackers import FileTracker
 
 # Setup logging
 logging.basicConfig(
@@ -57,13 +58,60 @@ class CitationExtractor:
         
         # Track failed files for logging
         self._last_failed_files = []
+        
+        # File tracker - will be initialized with output_dir when needed
+        self.file_tracker: Optional[FileTracker] = None
+
+    def _get_file_tracker(self, output_dir: Path) -> FileTracker:
+        """
+        Get or create file tracker for a specific output directory.
+        
+        Args:
+            output_dir: Directory where the bib-file will be stored
+            
+        Returns:
+            FileTracker instance for the specified directory
+        """
+        if self.file_tracker is None or self.file_tracker.output_dir != output_dir:
+            self.file_tracker = FileTracker(output_dir=output_dir)
+        return self.file_tracker
+
+    def _ensure_unique_citation_key(self, base_key: str, existing_keys: set, new_keys: set) -> str:
+        """
+        Ensure a citation key is unique by appending 'a', 'b', etc. if needed.
+        
+        Args:
+            base_key: The base citation key (e.g., "Author_2023")
+            existing_keys: Set of keys that already exist in the file
+            new_keys: Set of keys already added in this batch
+            
+        Returns:
+            Unique citation key
+        """
+        # Check if base key is available
+        if base_key not in existing_keys and base_key not in new_keys:
+            new_keys.add(base_key)
+            return base_key
+        
+        # Find next available suffix
+        suffix = 'a'
+        while True:
+            candidate_key = f"{base_key}{suffix}"
+            if candidate_key not in existing_keys and candidate_key not in new_keys:
+                new_keys.add(candidate_key)
+                return candidate_key
+            # Increment suffix: a, b, c, ... z, aa, ab, etc.
+            if suffix == 'z':
+                suffix = 'aa'
+            else:
+                suffix = chr(ord(suffix) + 1)
 
     def _generate_fallback_citation_key(self, pdf_path: Path) -> str:
         """
         Generate a fallback citation key from PDF path when metadata extraction fails.
         This helps identify the file in JabRef later.
         
-        Format: {CleanFileStem}_{YearOrYYYY}
+        Format: {CleanFileStem} (since no author/year available)
         
         Args:
             pdf_path: Path to the PDF file
@@ -74,20 +122,16 @@ class CitationExtractor:
         # Get the stem (filename without extension)
         stem = pdf_path.stem
         
-        # Try to extract year from filename
-        year_match = re.search(r'\b(19|20)\d{2}\b', stem)
-        year = year_match.group() if year_match else "YYYY"
-        
-        # Clean for BibTeX (remove special chars, replace spaces)
-        clean_stem = re.sub(r'[^a-zA-Z0-9]', '_', stem)
-        clean_stem = clean_stem.strip('_')
+        # Clean for BibTeX (remove special chars, replace spaces with nothing)
+        clean_stem = re.sub(r'[^a-zA-Z0-9]', '', stem)
+        clean_stem = clean_stem.strip()
         
         # Build citation key
-        citation_key = f"{clean_stem}_{year}"
+        citation_key = clean_stem if clean_stem else "UNKNOWN"
         
         # Ensure it's not empty
-        if not citation_key or citation_key == "_":
-            citation_key = f"UNKNOWN_{year}"
+        if not citation_key:
+            citation_key = "UNKNOWN"
         
         return citation_key
 
@@ -209,7 +253,51 @@ class CitationExtractor:
             "would_be_key": fallback_key
         }
 
-    def process_directory(self, directory: Path) -> Dict[str, List[Dict]]:
+    def _process_pdf_with_tracking(self, pdf_path: Path, group_name: str,
+                                   project_root: Path, file_tracker: FileTracker) -> Optional[Dict]:
+        """
+        Process a single PDF file with file tracking.
+        
+        This wraps process_pdf and registers the file with the tracker.
+        
+        Args:
+            pdf_path: Path to the PDF file
+            group_name: Group name for the file
+            project_root: Root directory for relative path calculation
+            file_tracker: FileTracker instance
+            
+        Returns:
+            Metadata dictionary with UUID, or the failure dict from process_pdf
+        """
+        # Process the PDF normally
+        result = self.process_pdf(pdf_path)
+        
+        if result and not result.get("_failed"):
+            # Generate citation key for tracking
+            citation_key = result.get("ID")
+            if not citation_key:
+                citation_key = self._generate_fallback_citation_key(pdf_path)
+            
+            # Register with tracker
+            file_uuid, is_new = file_tracker.register_file(
+                pdf_path,
+                citation_key,
+                project_root=project_root,
+                metadata={
+                    "group": group_name,
+                    "source": result.get("source", "unknown")
+                }
+            )
+            
+            # Add UUID to metadata
+            result["pdf_uuid"] = file_uuid
+            
+            if is_new:
+                logger.debug(f"Tracked new file: {pdf_path.name} -> UUID: {file_uuid[:8]}...")
+        
+        return result
+
+    def process_directory(self, directory: Path, output_path: Optional[Path] = None) -> Dict[str, List[Dict]]:
         """
         Process all PDF files in a directory and its subdirectories.
         Files are grouped by their immediate parent directory name.
@@ -217,6 +305,8 @@ class CitationExtractor:
 
         Args:
             directory: Directory to search for PDF files
+            output_path: Optional path to the output bib-file. If provided, used to
+                        initialize the file tracker in the same directory.
 
         Returns:
             Dictionary mapping group names to lists of citation metadata
@@ -230,6 +320,15 @@ class CitationExtractor:
 
         logger.info(f"Found {len(pdf_files)} PDF files in {directory}")
 
+        # Determine output directory for tracker
+        if output_path:
+            output_dir = output_path.parent
+        else:
+            output_dir = Path(self.config.get("output_directory", "./output"))
+        
+        # Initialize file tracker for this output directory
+        file_tracker = self._get_file_tracker(output_dir)
+        
         # Group citations by parent directory
         grouped_citations: Dict[str, List[Dict]] = {}
         failed_files = []  # List of dicts with failure details
@@ -249,8 +348,10 @@ class CitationExtractor:
                 else:
                     group_name = relative_path.parent.name
                 
-                # Process the PDF
-                result = self.process_pdf(pdf_path)
+                # Process the PDF and register with tracker
+                result = self._process_pdf_with_tracking(
+                    pdf_path, group_name, directory, file_tracker
+                )
                 
                 if result and not result.get("_failed"):
                     # Success - add group information to metadata
@@ -302,6 +403,11 @@ class CitationExtractor:
                 self._last_failed_files.append(failure)
                 logger.error(f"Error processing {pdf_path.name}: {e}")
 
+        # Cleanup missing files from tracker
+        cleaned = file_tracker.cleanup_missing_files()
+        if cleaned > 0:
+            logger.info(f"Cleaned up {cleaned} missing file entries from tracker")
+
         # Summary
         total_success = sum(len(c) for c in grouped_citations.values())
         logger.info(
@@ -338,6 +444,8 @@ class CitationExtractor:
             # Step 1: Read existing file if it exists and we're not overwriting
             existing_entries = {}  # Dict[citation_key, entry_dict]
             existing_content = ""
+            parse_failed = False  # Track if parsing failed
+            entries_without_uuid = {}  # Track entries without pdf_uuid for safety
             
             if not overwrite and output_path.exists():
                 with open(output_path, "r", encoding="utf-8") as f:
@@ -347,27 +455,109 @@ class CitationExtractor:
                 try:
                     existing_db = bibtexparser.loads(existing_content)
                     existing_entries = {entry["ID"]: entry for entry in existing_db.entries}
-                    logger.info(f"Found {len(existing_entries)} existing entries in {output_path}")
+                    
+                    # Track entries without UUID (manually added entries)
+                    entries_without_uuid = {k: v for k, v in existing_entries.items() if "pdf_uuid" not in v}
+                    
+                    # Check if file has content but 0 entries parsed (likely malformed)
+                    if existing_content.strip() and not existing_entries:
+                        logger.warning(f"BibTeX file appears to have content but parsed 0 entries (possible malformed BibTeX)")
+                        logger.warning(f"Preserving original content to avoid data loss")
+                        parse_failed = True
+                    else:
+                        logger.info(f"Found {len(existing_entries)} existing entries in {output_path}")
+                        if entries_without_uuid:
+                            logger.debug(f"Found {len(entries_without_uuid)} entries without UUID (manually added)")
                 except Exception as e:
-                    logger.warning(f"Could not parse existing BibTeX file, starting fresh: {e}")
-                    existing_entries = {}
+                    logger.error(f"Could not parse existing BibTeX file: {e}")
+                    logger.error(f"Preserving original content to avoid data loss")
+                    parse_failed = True
             
             # Step 2: Build all entries (new + existing)
+            # Create a mapping of UUID to entry for duplicate detection
+            # This includes UUIDs from both tracker-generated entries and manually added ones
+            uuid_to_entry = {}
+            for entry_id, entry in existing_entries.items():
+                if "pdf_uuid" in entry:
+                    uuid_to_entry[entry["pdf_uuid"]] = entry_id
+                    logger.debug(f"Found existing entry with UUID {entry['pdf_uuid'][:8]}... (key: {entry_id})")
+            
+            # Collect all existing citation keys for duplicate detection
+            existing_keys = set(existing_entries.keys())
+            # Track keys we're adding to detect duplicates among new entries
+            new_keys_added = set()
+            
             all_entries = dict(existing_entries)  # Start with existing
             new_count = 0
+            updated_count = 0
             
             for group_name, group_citations in citations.items():
                 for citation in group_citations:
+                    # Generate base citation key first
+                    base_entry = self.bibtex_exporter._create_bibtex_entry(citation)
+                    if not base_entry:
+                        continue
+                    
+                    # Get or generate a unique citation key
+                    entry_id = self._ensure_unique_citation_key(
+                        base_entry["ID"], 
+                        existing_keys, 
+                        new_keys_added
+                    )
+                    
+                    # Create final entry with unique key
                     entry = self.bibtex_exporter._create_bibtex_entry(citation)
-                    if entry:
-                        entry_id = entry["ID"]
-                        if entry_id in all_entries:
-                            # Entry already exists, skip it
-                            logger.debug(f"Skipping duplicate entry: {entry_id}")
-                        else:
-                            # New entry
-                            all_entries[entry_id] = entry
-                            new_count += 1
+                    entry["ID"] = entry_id
+                    
+                    entry_uuid = entry.get("pdf_uuid")
+                    
+                    # Check if this UUID already exists (file was already processed)
+                    if entry_uuid and entry_uuid in uuid_to_entry:
+                        # Same file, different citation key - keep the existing entry
+                        # but ensure it has the UUID
+                        existing_entry_id = uuid_to_entry[entry_uuid]
+                        existing_entry = all_entries[existing_entry_id]
+                        
+                        # Ensure the existing entry has the UUID
+                        if "pdf_uuid" not in existing_entry:
+                            existing_entry["pdf_uuid"] = entry_uuid
+                        
+                        # Keep the existing citation key (user may have customized it in JabRef)
+                        # Don't overwrite it with the generated one
+                        # But update other metadata fields
+                        for key, value in entry.items():
+                            if key != "ID" and key != "pdf_uuid":
+                                # Only update if the field is missing or empty in existing
+                                if key not in existing_entry or not existing_entry[key]:
+                                    existing_entry[key] = value
+                        
+                        updated_count += 1
+                        logger.info(f"Recognized existing entry via UUID {entry_uuid[:8]}... (keeping JabRef citation key: {existing_entry_id})")
+                        
+                    elif entry_id in all_entries:
+                        # Entry already exists by citation key, update it with UUID if missing
+                        existing_entry = all_entries[entry_id]
+                        if "pdf_uuid" not in existing_entry and entry_uuid:
+                            existing_entry["pdf_uuid"] = entry_uuid
+                            updated_count += 1
+                            logger.debug(f"Updated entry {entry_id} with UUID")
+                        # Keep the existing entry
+                        logger.debug(f"Entry already exists: {entry_id}, keeping existing")
+                    else:
+                        # New entry
+                        all_entries[entry_id] = entry
+                        new_count += 1
+                        
+                        # Track this UUID
+                        if entry_uuid:
+                            uuid_to_entry[entry_uuid] = entry_id
+            
+            # QUICK FIX: Ensure entries without UUID (manually added) are preserved
+            # This handles the case where bibtexparser might not parse all entries correctly
+            for entry_id, entry in entries_without_uuid.items():
+                if entry_id not in all_entries:
+                    all_entries[entry_id] = entry
+                    logger.debug(f"Restored manually added entry without UUID: {entry_id}")
             
             # Step 3: Generate JabRef metadata
             all_citation_data = []
@@ -393,20 +583,34 @@ class CitationExtractor:
             
             # Write everything to file
             with open(output_path, "w", encoding="utf-8") as bibfile:
-                # Write JabRef metadata first
-                if jabref_metadata:
-                    bibfile.write(jabref_metadata)
-                    bibfile.write("\n")
-                
-                # Add group comments for the new citation groups
-                for group_name, group_citations in citations.items():
-                    if group_citations:  # Only add group header if there are citations
-                        bibfile.write(f"% ===== Group: {group_name} =====\n\n")
-                
-                # Write all entries (existing + new)
-                bibfile.write(writer.write(db))
+                # If parsing failed, preserve original content
+                if parse_failed:
+                    bibfile.write(existing_content)
+                    bibfile.write("\n\n")
+                    # Add group comments for new citations
+                    for group_name, group_citations in citations.items():
+                        if group_citations:
+                            bibfile.write(f"% ===== Group: {group_name} =====\n\n")
+                    # Write new entries
+                    bibfile.write(writer.write(db))
+                else:
+                    # Normal case: write JabRef metadata first
+                    if jabref_metadata:
+                        bibfile.write(jabref_metadata)
+                        bibfile.write("\n")
+                    
+                    # Add group comments for the new citation groups
+                    for group_name, group_citations in citations.items():
+                        if group_citations:  # Only add group header if there are citations
+                            bibfile.write(f"% ===== Group: {group_name} =====\n\n")
+                    
+                    # Write all entries (existing + new)
+                    bibfile.write(writer.write(db))
 
-            logger.info(f"Exported to {output_path} ({new_count} new entries, {len(existing_entries)} existing preserved)")
+            if parse_failed:
+                logger.warning(f"Exported to {output_path} (preserved original content + {new_count} new entries)")
+            else:
+                logger.info(f"Exported to {output_path} ({new_count} new entries, {updated_count} updated, {len(all_entries) - new_count - updated_count} existing preserved)")
             return True
 
         except Exception as e:
@@ -486,6 +690,18 @@ class CitationExtractor:
     default=False,
     help="Overwrite existing .bib file instead of merging (default: merge with existing)",
 )
+@click.option(
+    "--show-tracker",
+    is_flag=True,
+    default=False,
+    help="Show all tracked files for the output directory and exit",
+)
+@click.option(
+    "--cleanup-tracker",
+    is_flag=True,
+    default=False,
+    help="Clean up missing file entries from the tracker and exit",
+)
 def main(
     directory: Optional[Path],
     pdf_file: Optional[Path],
@@ -494,6 +710,8 @@ def main(
     config_path: Optional[Path],
     verbose: bool,
     overwrite: bool,
+    show_tracker: bool = False,
+    cleanup_tracker: bool = False,
 ):
     """
     PDF Citation Metadata Extractor
@@ -515,6 +733,34 @@ def main(
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
+    # Handle tracker-only operations
+    if show_tracker or cleanup_tracker:
+        from src.trackers import FileTracker
+        
+        # Determine output directory
+        output_dir = output_path.parent if output_path else Path.cwd()
+        tracker = FileTracker(output_dir=output_dir)
+        
+        if show_tracker:
+            entries = tracker.list_all_entries()
+            click.echo(f"\nTracked files in {output_dir}:\n")
+            click.echo(f"Total: {len(entries)} files\n")
+            
+            for entry in entries:
+                click.echo(f"UUID: {entry.uuid[:8]}...")
+                display_path = entry.relative_path if entry.relative_path else entry.file_path
+                click.echo(f"  Path: {display_path}")
+                click.echo(f"  Citation Key: {entry.citation_key}")
+                click.echo(f"  First Seen: {entry.first_seen}")
+                click.echo(f"  Last Seen: {entry.last_seen}")
+                click.echo()
+            return
+        
+        if cleanup_tracker:
+            removed = tracker.cleanup_missing_files()
+            click.echo(f"\nCleaned up {removed} missing file entries from tracker")
+            return
+
     # Validate input
     if not directory and not pdf_file:
         click.echo("Error: Must specify either --dir or --pdf", err=True)
@@ -533,7 +779,22 @@ def main(
     
     if pdf_file:
         click.echo(f"\nProcessing single PDF: {pdf_file.name}")
-        result = extractor.process_pdf(pdf_file)
+        
+        # Initialize tracker for single file processing
+        output_dir = output_path.parent if output_path else Path.cwd()
+        file_tracker = extractor._get_file_tracker(output_dir)
+        
+        # Process with tracking
+        result = extractor._process_pdf_with_tracking(
+            pdf_file, 
+            "General", 
+            pdf_file.parent,  # Use parent as project root for relative path
+            file_tracker
+        )
+        
+        # Cleanup tracker
+        file_tracker.cleanup_missing_files()
+        
         if result and not result.get("_failed"):
             # Success
             metadata = result
@@ -559,7 +820,7 @@ def main(
 
     elif directory:
         click.echo(f"\nProcessing directory: {directory}")
-        citations = extractor.process_directory(directory)
+        citations = extractor.process_directory(directory, output_path=output_path)
         
         # Check if we have any citations at all
         if not any(citations.values()):

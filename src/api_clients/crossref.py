@@ -115,9 +115,6 @@ class CrossRefClient:
         # Type (article, book, etc.)
         metadata["type"] = message.get("type")
 
-        # Abstract
-        metadata["abstract"] = message.get("abstract")
-
         # ISSN
         if "ISSN" in message and message["ISSN"]:
             metadata["issn"] = message["ISSN"][0]
