@@ -266,7 +266,7 @@ class BibTeXExporter:
             grouping_lines.append(f"{depth} StaticGroup:{escaped_group}\\;0\\;1\\;0x8a8a8aff\\;\\;\\;;")
 
         grouping_content = "\n".join(grouping_lines)
-        metadata = f"@Comment{{jabref-meta: databaseType:bibtex;}}\n\n@Comment{{jabref-meta: grouping:\n{grouping_content}\n}}"
+        metadata = f"@Comment{{jabref-meta: databaseType:biblatex;}}\n\n@Comment{{jabref-meta: grouping:\n{grouping_content}\n}}"
         return metadata
 
     def export_single(self, metadata: Dict) -> str:

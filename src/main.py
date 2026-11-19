@@ -14,6 +14,10 @@ from src.api_clients import CrossRefClient
 from src.exporters import BibTeXExporter
 from src.trackers import FileTracker
 
+# Import bibtexparser for custom parser
+import bibtexparser
+from bibtexparser.bparser import BibTexParser
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -24,6 +28,16 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+
+
+def _create_bibtex_parser():
+    """
+    Create a BibTexParser that accepts non-standard entry types (for biblatex support).
+    
+    Returns:
+        BibTexParser configured to accept all entry types
+    """
+    return BibTexParser(ignore_nonstandard_types=False)
 
 
 class CitationExtractor:
@@ -135,9 +149,96 @@ class CitationExtractor:
         
         return citation_key
 
+    def _is_high_quality_metadata(self, metadata: Dict) -> bool:
+        """
+        Check if extracted metadata meets basic quality standards.
+        Returns False if metadata is too low quality to be useful.
+        
+        Low quality metadata includes:
+        - Missing or generic titles ("Misc", "Untitled", "Unknown")
+        - Missing or generic authors ("Unknown", "Anonymous")
+        - Invalid years ("YYYY", "Unknown", "0000")
+        - PII numbers as DOI (S1234-5678(99)12345-6 format)
+        - Missing critical fields
+        
+        Args:
+            metadata: Citation metadata dictionary
+            
+        Returns:
+            True if metadata is high quality, False otherwise
+        """
+        # Must have at least title or author
+        if not metadata.get("title") and not metadata.get("author"):
+            logger.debug("Low quality: Missing both title and author")
+            return False
+
+        # Check for bad titles (only if title exists)
+        if "title" in metadata:
+            title = str(metadata["title"]).strip().lower()
+            # Reject empty titles (after stripping)
+            if not title:
+                logger.debug("Low quality: Empty title")
+                return False
+            bad_titles = ["misc", "untitled", "document", "unknown", "no title", "title", 
+                         "article", "paper", "publication"]
+            if title in bad_titles:
+                logger.debug(f"Low quality: Generic title '{title}'")
+                return False
+
+        # Check for bad authors (only if author exists)
+        if "author" in metadata:
+            author = str(metadata["author"]).strip().lower()
+            # Reject empty authors (after stripping)
+            if not author:
+                logger.debug("Low quality: Empty author")
+                return False
+            bad_authors = ["unknown", "anonymous", "none", "no author", "author"]
+            if author in bad_authors:
+                logger.debug(f"Low quality: Generic author '{author}'")
+                return False
+
+        # Check for bad years (only if year exists)
+        if "year" in metadata:
+            year = str(metadata["year"]).strip()
+            bad_years = ["YYYY", "Unknown", "0000", "0", "1900"]
+            if year in bad_years:
+                logger.debug(f"Low quality: Bad year '{year}'")
+                return False
+            
+            # Check for valid year range (if it's a number)
+            try:
+                year_num = int(year)
+                if year_num < 1900 or year_num > 2100:
+                    logger.debug(f"Low quality: Year out of range '{year}'")
+                    return False
+            except ValueError:
+                # If year is not a number, it might be a string like "2023-2024"
+                # Only reject if it's in our bad_years list
+                pass
+
+        # Check for PII numbers as DOI (S1234-5678(99)12345-6 format)
+        doi = str(metadata.get("doi", "")).strip()
+        if doi:
+            # PII pattern: S1234-5678(99)12345-6
+            if re.match(r'^S\d{4}-\d{4}\(\d{2}\)\d+-\d+$', doi):
+                logger.debug(f"Low quality: PII number as DOI '{doi}'")
+                return False
+
+        # Check for bad journals (if present)
+        journal = str(metadata.get("journal", "")).strip().lower()
+        if journal:
+            bad_journals = ["unknown", "misc", "none", "no journal", "journal", ""]
+            if journal in bad_journals:
+                logger.debug(f"Low quality: Generic journal '{journal}'")
+                return False
+
+        # If all checks passed, it's high quality
+        return True
+
     def _write_failed_files_log(self, failed_files: List[Dict], output_path: Path) -> None:
         """
-        Write a detailed log file of failed extractions to help with manual JabRef entry creation.
+        Write a detailed log file of failed extractions.
+        Emphasizes that these files MUST be added manually to JabRef.
         
         Args:
             failed_files: List of failure dictionaries with keys: path, relative_path, group, error, would_be_key
@@ -148,35 +249,91 @@ class CitationExtractor:
         
         # Determine log file location
         if output_path.parent != Path("."):
-            # output_path has a directory component
             log_dir = output_path.parent
         else:
-            # Use default output directory from config
             log_dir = Path(self.config.get("output_directory", "./output"))
         
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / "failed_extractions.log"
         
         with open(log_file, "w", encoding="utf-8") as f:
-            f.write("# PDF Citation Extraction - Failed Files\n")
-            f.write(f"# Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"# Output file: {output_path.name}\n")
-            f.write("#\n")
-            f.write("# How to use this file with JabRef:\n")
-            f.write("#   1. Open your .bib file in JabRef\n")
-            f.write("#   2. For each failed file below, manually create an entry\n")
-            f.write("#   3. Use the 'Would-be Citation Key' as the entry's BibTeX key\n")
-            f.write("#   4. Add the entry to the specified 'Group'\n")
-            f.write("#\n")
-            f.write(f"# Total failed: {len(failed_files)}\n\n")
+            f.write("# " + "="*70 + "\n")
+            f.write("# PDF CITATION EXTRACTOR - FAILED FILES REPORT\n")
+            f.write("# " + "="*70 + "\n\n")
+            
+            f.write(f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Output file: {output_path}\n\n")
+            
+            f.write("="*70 + "\n")
+            f.write("IMPORTANT: These files could NOT be processed automatically.\n")
+            f.write("You MUST add them manually to JabRef using the information below.\n")
+            f.write("="*70 + "\n\n")
+            
+            f.write("HOW TO ADD MANUALLY:\n")
+            f.write("1. Open your .bib file in JabRef\n")
+            f.write("2. For each file below, create a new entry\n")
+            f.write("3. Use the 'Suggested BibTeX Key' as the entry's citation key\n")
+            f.write("4. Add the entry to the specified 'Group'\n")
+            f.write("5. Fill in the metadata manually (title, author, year, etc.)\n")
+            f.write("   - You can find metadata by searching for the DOI or title online\n")
+            f.write("   - Or extract it manually from the PDF file\n\n")
+            
+            f.write(f"Total files that need manual addition: {len(failed_files)}\n\n")
+            
+            f.write("-"*70 + "\n")
+            f.write("FAILED FILES:\n")
+            f.write("-"*70 + "\n\n")
             
             for i, failure in enumerate(failed_files, 1):
-                f.write(f"## Failed File #{i}\n")
-                f.write(f"- **File**: {failure['relative_path']}\n")
-                f.write(f"- **Group**: {failure['group']}\n")
-                f.write(f"- **Would-be Citation Key**: {failure['would_be_key']}\n")
-                f.write(f"- **Reason**: {failure['error']}\n")
-                f.write(f"- **Action**: Create entry manually in JabRef with key '{failure['would_be_key']}'\n\n")
+                f.write(f"File #{i}: {failure['relative_path']}\n")
+                f.write(f"  Group: {failure['group']}\n")
+                f.write(f"  Suggested BibTeX Key: {failure['would_be_key']}\n")
+                f.write(f"  Full Path: {failure['path']}\n")
+                f.write(f"  Reason: {failure['error']}\n")
+                f.write(f"\n")
+                f.write(f"  ACTION REQUIRED: Add this file manually to JabRef!\n")
+                f.write(f"  - BibTeX key: {failure['would_be_key']}\n")
+                f.write(f"  - Group: {failure['group']}\n")
+                f.write(f"\n")
+            
+            f.write("-"*70 + "\n")
+            f.write("NOTES:\n")
+            f.write("- Once added manually, these entries will be PRESERVED in future runs\n")
+            f.write("  (the scimmer recognizes manually added entries by their lack of pdf_uuid field)\n")
+            f.write("- Failed files are typically PDFs without embedded metadata or DOI\n")
+            f.write("- You can try to extract metadata manually or search for the paper online\n")
+            f.write("="*70 + "\n")
+
+    def _format_failed_files_cli(self, failed_files: List[Dict]) -> str:
+        """
+        Format failed files for CLI output.
+        
+        Args:
+            failed_files: List of failure dictionaries with keys: path, relative_path, group, error, would_be_key
+            
+        Returns:
+            Formatted string for CLI output
+        """
+        if not failed_files:
+            return ""
+        
+        lines = []
+        lines.append("")
+        lines.append(f"! {len(failed_files)} files failed extraction:")
+        lines.append("")
+        
+        for i, failure in enumerate(failed_files, 1):
+            lines.append(f"   [{i}] {failure['relative_path']}")
+            lines.append(f"       Group: {failure['group']}")
+            lines.append(f"       Error: {failure['error']}")
+            lines.append(f"       Suggested key: {failure['would_be_key']}")
+        
+        lines.append("")
+        lines.append("   These files need manual addition to JabRef.")
+        lines.append("   See failed_extractions.log for detailed instructions.")
+        lines.append("")
+        
+        return "\n".join(lines)
 
     def _load_config(self, config_path: Optional[Path]) -> Dict:
         """Load configuration from YAML file."""
@@ -203,12 +360,14 @@ class CitationExtractor:
     def process_pdf(self, pdf_path: Path) -> Optional[Dict]:
         """
         Process a single PDF file and extract citation metadata.
+        
+        NEW: Includes quality assessment - low quality metadata is treated as failure.
 
         Args:
             pdf_path: Path to PDF file
 
         Returns:
-            Citation metadata dictionary or None if extraction failed
+            Citation metadata dictionary, failure dictionary, or None if extraction failed
         """
         logger.info(f"Processing: {pdf_path.name}")
 
@@ -227,6 +386,18 @@ class CitationExtractor:
                 metadata.update(crossref_metadata)
                 metadata["source"] = "crossref"
                 metadata["pdf_file"] = pdf_path.name
+                
+                # NEW: Check metadata quality
+                if not self._is_high_quality_metadata(metadata):
+                    fallback_key = self._generate_fallback_citation_key(pdf_path)
+                    logger.warning(f"Low quality metadata from CrossRef for {pdf_path.name}")
+                    return {
+                        "_failed": True,
+                        "pdf_path": str(pdf_path),
+                        "error": "Low quality metadata from CrossRef (suspect or incomplete data)",
+                        "would_be_key": fallback_key
+                    }
+                
                 return metadata
 
         # If we have useful embedded metadata, use it
@@ -234,6 +405,18 @@ class CitationExtractor:
             logger.info(f"Using embedded metadata for {pdf_path.name}")
             metadata["source"] = "embedded"
             metadata["pdf_file"] = pdf_path.name
+            
+            # NEW: Check metadata quality for embedded metadata
+            if not self._is_high_quality_metadata(metadata):
+                fallback_key = self._generate_fallback_citation_key(pdf_path)
+                logger.warning(f"Low quality embedded metadata for {pdf_path.name}")
+                return {
+                    "_failed": True,
+                    "pdf_path": str(pdf_path),
+                    "error": "Low quality embedded metadata (suspect or incomplete data)",
+                    "would_be_key": fallback_key
+                }
+            
             return metadata
 
         # Strategy 3: GROBID fallback for PDFs without DOI or embedded metadata
@@ -241,6 +424,20 @@ class CitationExtractor:
             logger.info(f"Trying GROBID extraction for {pdf_path.name}")
             grobid_metadata = self.grobid_client.process(pdf_path)
             if grobid_metadata:
+                grobid_metadata["source"] = "grobid"
+                grobid_metadata["pdf_file"] = pdf_path.name
+                
+                # NEW: Check metadata quality for GROBID
+                if not self._is_high_quality_metadata(grobid_metadata):
+                    fallback_key = self._generate_fallback_citation_key(pdf_path)
+                    logger.warning(f"Low quality metadata from GROBID for {pdf_path.name}")
+                    return {
+                        "_failed": True,
+                        "pdf_path": str(pdf_path),
+                        "error": "Low quality metadata from GROBID (suspect or incomplete data)",
+                        "would_be_key": fallback_key
+                    }
+                
                 return grobid_metadata
         
         # All strategies failed - return failure info with fallback citation key
@@ -427,6 +624,9 @@ class CitationExtractor:
         """
         Export grouped citations to BibTeX file with group comments.
         By default, merges with existing file to avoid overwriting entries.
+        
+        IMPORTANT: Manual entries (without pdf_uuid) are ALWAYS preserved.
+        Auto entries (with pdf_uuid) are managed by the scimmer.
 
         Args:
             citations: Dictionary mapping group names to lists of citation metadata
@@ -445,19 +645,44 @@ class CitationExtractor:
             existing_entries = {}  # Dict[citation_key, entry_dict]
             existing_content = ""
             parse_failed = False  # Track if parsing failed
-            entries_without_uuid = {}  # Track entries without pdf_uuid for safety
+            
+            # NEW: Clearly separate manual entries (no UUID) from auto entries (with UUID)
+            manual_entries = {}  # Entries without pdf_uuid - ALWAYS preserved
+            auto_entries = {}    # Entries with pdf_uuid - managed by scimmer
             
             if not overwrite and output_path.exists():
                 with open(output_path, "r", encoding="utf-8") as f:
                     existing_content = f.read()
                 
-                # Parse existing BibTeX file
+                # NEW: Extract original entry types (preserve case for biblatex)
+                import re
+                entry_type_map = {}  # entry_id -> original entry type
+                entry_pattern = r'@([a-zA-Z]+)\s*\{([^,\s]+)'
+                for match in re.finditer(entry_pattern, existing_content):
+                    entry_type = match.group(1)
+                    entry_id = match.group(2).strip()
+                    entry_type_map[entry_id] = entry_type
+                
+                # Parse existing BibTeX file (support biblatex entry types)
                 try:
-                    existing_db = bibtexparser.loads(existing_content)
+                    parser = _create_bibtex_parser()
+                    existing_db = bibtexparser.loads(existing_content, parser=parser)
                     existing_entries = {entry["ID"]: entry for entry in existing_db.entries}
                     
-                    # Track entries without UUID (manually added entries)
-                    entries_without_uuid = {k: v for k, v in existing_entries.items() if "pdf_uuid" not in v}
+                    # NEW: Fix entry types to preserve original case
+                    for entry_id, entry in existing_entries.items():
+                        if entry_id in entry_type_map:
+                            original_type = entry_type_map[entry_id]
+                            entry["ENTRYTYPE"] = original_type
+                    
+                    # NEW: Explicitly separate manual vs auto entries
+                    for entry_id, entry in existing_entries.items():
+                        if "pdf_uuid" in entry:
+                            auto_entries[entry_id] = entry
+                            logger.debug(f"Found auto entry with UUID: {entry_id}")
+                        else:
+                            manual_entries[entry_id] = entry
+                            logger.debug(f"Found manual entry (no UUID): {entry_id}")
                     
                     # Check if file has content but 0 entries parsed (likely malformed)
                     if existing_content.strip() and not existing_entries:
@@ -465,29 +690,41 @@ class CitationExtractor:
                         logger.warning(f"Preserving original content to avoid data loss")
                         parse_failed = True
                     else:
-                        logger.info(f"Found {len(existing_entries)} existing entries in {output_path}")
-                        if entries_without_uuid:
-                            logger.debug(f"Found {len(entries_without_uuid)} entries without UUID (manually added)")
+                        logger.info(f"Found {len(auto_entries)} auto entries and {len(manual_entries)} manual entries in {output_path}")
                 except Exception as e:
                     logger.error(f"Could not parse existing BibTeX file: {e}")
                     logger.error(f"Preserving original content to avoid data loss")
                     parse_failed = True
             
+            # NEW: If we have existing entries but parsing failed, try to preserve them
+            if parse_failed and existing_entries:
+                # If we have entries from a previous successful parse, use them
+                for entry_id, entry in existing_entries.items():
+                    if "pdf_uuid" in entry:
+                        auto_entries[entry_id] = entry
+                    else:
+                        manual_entries[entry_id] = entry
+                logger.info(f"Recovered {len(auto_entries) + len(manual_entries)} entries after parse failure")
+            
             # Step 2: Build all entries (new + existing)
-            # Create a mapping of UUID to entry for duplicate detection
-            # This includes UUIDs from both tracker-generated entries and manually added ones
+            # Create a mapping of UUID to entry for duplicate detection (only for auto entries)
             uuid_to_entry = {}
-            for entry_id, entry in existing_entries.items():
+            for entry_id, entry in auto_entries.items():
                 if "pdf_uuid" in entry:
                     uuid_to_entry[entry["pdf_uuid"]] = entry_id
-                    logger.debug(f"Found existing entry with UUID {entry['pdf_uuid'][:8]}... (key: {entry_id})")
+                    logger.debug(f"Tracked auto entry with UUID {entry['pdf_uuid'][:8]}... (key: {entry_id})")
             
-            # Collect all existing citation keys for duplicate detection
-            existing_keys = set(existing_entries.keys())
+            # Collect all auto entry keys for duplicate detection
+            existing_auto_keys = set(auto_entries.keys())
             # Track keys we're adding to detect duplicates among new entries
             new_keys_added = set()
             
-            all_entries = dict(existing_entries)  # Start with existing
+            # NEW: Start with manual entries - they are ALWAYS preserved
+            all_entries = dict(manual_entries)
+            
+            # Add existing auto entries
+            all_entries.update(auto_entries)
+            
             new_count = 0
             updated_count = 0
             
@@ -501,7 +738,7 @@ class CitationExtractor:
                     # Get or generate a unique citation key
                     entry_id = self._ensure_unique_citation_key(
                         base_entry["ID"], 
-                        existing_keys, 
+                        existing_auto_keys, 
                         new_keys_added
                     )
                     
@@ -511,8 +748,13 @@ class CitationExtractor:
                     
                     entry_uuid = entry.get("pdf_uuid")
                     
+                    # Only process entries that have UUIDs (from successfully tracked files)
+                    if not entry_uuid:
+                        logger.warning(f"Entry {entry_id} has no UUID, skipping (should not happen)")
+                        continue
+                    
                     # Check if this UUID already exists (file was already processed)
-                    if entry_uuid and entry_uuid in uuid_to_entry:
+                    if entry_uuid in uuid_to_entry:
                         # Same file, different citation key - keep the existing entry
                         # but ensure it has the UUID
                         existing_entry_id = uuid_to_entry[entry_uuid]
@@ -532,10 +774,10 @@ class CitationExtractor:
                                     existing_entry[key] = value
                         
                         updated_count += 1
-                        logger.info(f"Recognized existing entry via UUID {entry_uuid[:8]}... (keeping JabRef citation key: {existing_entry_id})")
+                        logger.info(f"Recognized existing auto entry via UUID {entry_uuid[:8]}... (keeping JabRef citation key: {existing_entry_id})")
                         
                     elif entry_id in all_entries:
-                        # Entry already exists by citation key, update it with UUID if missing
+                        # Entry already exists by citation key
                         existing_entry = all_entries[entry_id]
                         if "pdf_uuid" not in existing_entry and entry_uuid:
                             existing_entry["pdf_uuid"] = entry_uuid
@@ -544,20 +786,13 @@ class CitationExtractor:
                         # Keep the existing entry
                         logger.debug(f"Entry already exists: {entry_id}, keeping existing")
                     else:
-                        # New entry
+                        # New auto entry
                         all_entries[entry_id] = entry
                         new_count += 1
                         
                         # Track this UUID
-                        if entry_uuid:
-                            uuid_to_entry[entry_uuid] = entry_id
-            
-            # QUICK FIX: Ensure entries without UUID (manually added) are preserved
-            # This handles the case where bibtexparser might not parse all entries correctly
-            for entry_id, entry in entries_without_uuid.items():
-                if entry_id not in all_entries:
-                    all_entries[entry_id] = entry
-                    logger.debug(f"Restored manually added entry without UUID: {entry_id}")
+                        uuid_to_entry[entry_uuid] = entry_id
+                        existing_auto_keys.add(entry_id)
             
             # Step 3: Generate JabRef metadata
             all_citation_data = []
@@ -793,7 +1028,7 @@ def main(
         )
         
         # Cleanup tracker
-        file_tracker.cleanup_missing_files()
+        file_tracker.cleanup_missing_files() #issue1: maybe filetracker deletes manual entries here
         
         if result and not result.get("_failed"):
             # Success
@@ -811,7 +1046,8 @@ def main(
             }
             failed_files.append(failure)
             extractor._last_failed_files = failed_files
-            click.echo(f"Failed to extract metadata from {pdf_file.name}: {failure['error']}", err=True)
+            # Print failed file details to CLI
+            click.echo(extractor._format_failed_files_cli(failed_files), err=False)
             raise click.Abort()
         else:
             # Unexpected None
@@ -828,6 +1064,8 @@ def main(
             # Write failed files log even if all failed
             if extractor._last_failed_files:
                 extractor._write_failed_files_log(extractor._last_failed_files, output_path)
+                # Print failed file details to CLI
+                click.echo(extractor._format_failed_files_cli(extractor._last_failed_files), err=False)
             raise click.Abort()
 
     # Export results
@@ -843,19 +1081,46 @@ def main(
             # Write failed files log if any failures occurred
             if extractor._last_failed_files:
                 extractor._write_failed_files_log(extractor._last_failed_files, output_path)
-                click.echo(f"Failed files log: {output_path.parent / 'failed_extractions.log'}")
+                click.echo(f"\n⚠️  Failed files log: {output_path.parent / 'failed_extractions.log'}")
+                click.echo(extractor._format_failed_files_cli(extractor._last_failed_files), err=False)
+            
             # Count total citations across all groups
-            total_count = sum(len(c) for c in citations.values())
+            total_auto_count = sum(len(c) for c in citations.values())
             group_count = len(citations)
             
-            click.echo(f"Successfully exported to {output_path}")
+            click.echo(f"\n✅ Successfully exported to {output_path}")
             click.echo(f"\nSummary:")
-            click.echo(f"  - Total citations: {total_count}")
+            click.echo(f"  - New auto-extracted citations: {total_auto_count}")
             click.echo(f"  - Groups: {group_count}")
             for group_name, group_citations in citations.items():
                 click.echo(f"    - {group_name}: {len(group_citations)} citations")
             click.echo(f"  - Output format: {output_format}")
             click.echo(f"  - Output file: {output_path}")
+            
+            # NEW: Show manual entry preservation info
+            if output_path.exists() and not overwrite:
+                try:
+                    # Count manual entries in the final file
+                    import bibtexparser
+                    with open(output_path, "r", encoding="utf-8") as f:
+                        final_content = f.read()
+                    parser = _create_bibtex_parser()
+                    final_db = bibtexparser.loads(final_content, parser=parser)
+                    manual_count = sum(1 for e in final_db.entries if "pdf_uuid" not in e)
+                    auto_count = len(final_db.entries) - manual_count
+                    
+                    if manual_count > 0:
+                        click.echo(f"  - Manual entries preserved: {manual_count}")
+                    click.echo(f"  - Total entries in file: {len(final_db.entries)} ({auto_count} auto + {manual_count} manual)")
+                except Exception as e:
+                    logger.debug(f"Could not count entries for summary: {e}")
+            
+            # NEW: Clear instructions for failed files
+            if extractor._last_failed_files:
+                click.echo(f"\n📝 {len(extractor._last_failed_files)} files could not be processed automatically.")
+                click.echo("   These MUST be added manually to JabRef.")
+                click.echo("   See 'failed_extractions.log' for detailed instructions.")
+                click.echo("   Manually added entries will be preserved in future runs.")
         else:
             click.echo("Export failed", err=True)
             raise click.Abort()

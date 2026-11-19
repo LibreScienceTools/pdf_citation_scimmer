@@ -114,13 +114,13 @@ class TestE2ECLI:
         """Test CLI with verbose logging."""
         runner = CliRunner()
 
-        # Mock PDF
+        # Mock PDF with high-quality metadata
         mock_doc = MagicMock()
         mock_page = MagicMock()
         mock_page.get_text.return_value = "Test"
         mock_doc.__getitem__.return_value = mock_page
         mock_doc.__len__.return_value = 1
-        mock_doc.metadata = {"title": "Test"}
+        mock_doc.metadata = {"title": "Test Paper", "author": "John Smith"}
         mock_fitz_open.return_value = mock_doc
 
         with runner.isolated_filesystem():
@@ -139,13 +139,13 @@ class TestE2ECLI:
         """Test CLI with custom output path."""
         runner = CliRunner()
 
-        # Mock PDF
+        # Mock PDF with high-quality metadata
         mock_doc = MagicMock()
         mock_page = MagicMock()
         mock_page.get_text.return_value = "Test"
         mock_doc.__getitem__.return_value = mock_page
         mock_doc.__len__.return_value = 1
-        mock_doc.metadata = {"title": "Test", "author": "Author"}
+        mock_doc.metadata = {"title": "Test Paper", "author": "Jane Doe"}
         mock_fitz_open.return_value = mock_doc
 
         with runner.isolated_filesystem():
@@ -186,7 +186,7 @@ class TestE2ECLI:
             )
 
             assert result.exit_code == 1
-            assert "No citations extracted" in result.output
+            assert "No metadata extracted" in result.output
 
     @patch("fitz.open")
     @patch("habanero.Crossref.works")

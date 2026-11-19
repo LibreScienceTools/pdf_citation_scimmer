@@ -1,7 +1,7 @@
 # PDF Citation Extractor - API Reference
 
-**Version:** 0.1.0  
-**Last Updated:** 2026-10-20
+**Version:** 0.2.0  
+**Last Updated:** 2026-10-21
 
 ---
 
@@ -17,8 +17,76 @@ This document provides a complete API reference for the PDF Citation Extractor l
 2. [API Clients](#api-clients)
 3. [Extractors](#extractors)
 4. [Exporters](#exporters)
-5. [Type Definitions](#type-definitions)
-6. [Exception Handling](#exception-handling)
+5. [Trackers](#trackers)
+6. [Type Definitions](#type-definitions)
+7. [Exception Handling](#exception-handling)
+
+---
+
+## Manual Entry Preservation
+
+**NEW in v0.2.0:** The PDF Citation Extractor now fully supports mixed workflows with manually added JabRef entries.
+
+### Core Principle
+
+> **Entries without `pdf_uuid` field are ALWAYS preserved**
+
+This simple rule enables powerful mixed workflows:
+
+### Entry Types
+
+| Type | Has `pdf_uuid` | Managed By | Preservation |
+|------|---------------|------------|--------------|
+| Auto (from PDF) | ✅ Yes | Scimmer | Updated on re-processing |
+| Manual (from JabRef) | ❌ No | User | **ALWAYS preserved** |
+
+### How It Works
+
+1. **Auto entries**: Successfully processed PDFs get a `pdf_uuid` field and are tracked
+2. **Manual entries**: Entries you add in JabRef don't have `pdf_uuid` and are never touched
+3. **Merge behavior**: When exporting, manual entries are always kept, auto entries are managed
+
+### Example Workflow
+
+```python
+# First run: process PDFs
+extractor = CitationExtractor()
+citations = extractor.process_directory(Path("./papers"))
+extractor.export_citations(citations, Path("refs.bib"))
+
+# User adds manual entries in JabRef for files that failed
+# (these entries won't have pdf_uuid field)
+
+# Second run: process more PDFs
+extractor.export_citations(new_citations, Path("refs.bib"))
+# Manual entries are PRESERVED, new auto entries are added
+```
+
+### Failed Files
+
+Files that fail processing are logged in `failed_extractions.log` with:
+- Clear instructions for manual addition
+- Suggested BibTeX keys
+- Group information
+- Reason for failure
+
+**User must manually add these to JabRef** - they won't be processed automatically.
+
+### CLI Feedback
+
+The CLI now shows preservation status:
+```
+✅ Successfully exported to references.bib
+
+Summary:
+  - New auto-extracted citations: 15
+  - Manual entries preserved: 2
+  - Total entries in file: 17 (15 auto + 2 manual)
+
+⚠️  3 files failed extraction.
+   These MUST be added manually to JabRef.
+   See 'failed_extractions.log' for detailed instructions.
+```
 
 ---
 
@@ -27,7 +95,7 @@ This document provides a complete API reference for the PDF Citation Extractor l
 ### `CitationExtractor`
 
 **Module:** `src.main`  
-**Purpose:** Main orchestrator class for citation extraction
+**Purpose:** Main orchestrator class for citation extraction with file tracking
 
 #### Constructor
 
@@ -87,6 +155,11 @@ Process a single PDF file and extract citation metadata.
 }
 ```
 
+**NEW in v0.2.0:** Metadata may also include:
+- `"pdf_uuid"`: UUID for file tracking (when processed with tracking)
+- `"group"`: Group name for JabRef organization
+- `"group_path"`: Relative path to group directory
+
 **Failure Structure:**
 ```python
 {
@@ -97,73 +170,38 @@ Process a single PDF file and extract citation metadata.
 }
 ```
 
-**Example:**
-```python
-from pathlib import Path
-from src.main import CitationExtractor
-
-extractor = CitationExtractor()
-result = extractor.process_pdf(Path("paper.pdf"))
-
-if result and not result.get("_failed"):
-    # Success
-    print(f"Title: {result['title']}")
-    print(f"Authors: {result['author']}")
-    print(f"Year: {result['year']}")
-elif result and result.get("_failed"):
-    # Failed - handle the error
-    print(f"Failed to extract: {result['error']}")
-    print(f"Suggested citation key: {result['would_be_key']}")
-```
-
 ---
 
-##### `process_directory(directory: Path) -> Dict[str, List[Dict]]`
+##### `process_directory(directory: Path, output_path: Optional[Path] = None) -> Dict[str, List[Dict]]`
 
-Process all PDF files in a directory and its subdirectories.
+**UPDATED in v0.2.0:** Process all PDF files in a directory with file tracking.
+
+Process all PDF files in a directory and its subdirectories. Files are grouped by their immediate parent directory name. Files in the root directory are grouped under "General".
 
 **Parameters:**
 - `directory` (Path): Directory containing PDF files
+- `output_path` (Optional[Path]): Optional path to the output bib-file. If provided, used to initialize the file tracker for persistent identification.
 
 **Returns:**
 - `Dict[str, List[Dict]]`: Dictionary mapping group names to lists of citation metadata
   - Groups are based on subdirectory names
   - Files in root directory are grouped under "General"
   - Failed extractions are stored in `extractor._last_failed_files`
+  - Each metadata dict includes `pdf_uuid` for file tracking
 
-**Behavior:**
-- Scans directory recursively for files with `.pdf` extension
-- Displays progress bar using tqdm
-- Logs successful and failed extractions
-- Returns grouped citations (only successful extractions)
-- Failed files are tracked and can be accessed via `_last_failed_files` attribute
-
-**Example:**
-```python
-from pathlib import Path
-from src.main import CitationExtractor
-
-extractor = CitationExtractor()
-citations = extractor.process_directory(Path("./papers"))
-
-print(f"Successfully extracted {sum(len(c) for c in citations.values())} citations")
-for group_name, group_citations in citations.items():
-    print(f"\n{group_name}:")
-    for citation in group_citations:
-        print(f"  - {citation['pdf_file']}: {citation.get('title', 'No title')}")
-
-# Access failed files if any
-if extractor._last_failed_files:
-    print(f"\nFailed: {len(extractor._last_failed_files)} files")
-    for failure in extractor._last_failed_files:
-        print(f"  - {failure['relative_path']}: {failure['error']}")
-```
+**NEW Features:**
+- Integrates with FileTracker for persistent file identification
+- Automatically cleans up missing file entries from tracker
+- Each processed file gets a UUID for future reference
+- Better error handling and failure tracking
 
 ---
 
 ##### `export_citations(citations: Dict[str, List[Dict]], output_path: Path, format: str = "bibtex", overwrite: bool = False) -> bool`
 
-Export citations to a file.
+**UPDATED in v0.2.0:** Export citations to a file with UUID-based merge support.
+
+Export citations to a file with smart merge functionality.
 
 **Parameters:**
 - `citations` (Dict[str, List[Dict]]): Dictionary mapping group names to lists of citation metadata
@@ -174,45 +212,27 @@ Export citations to a file.
 **Returns:**
 - `bool`: True if export successful, False otherwise
 
-**Supported Formats:**
-- `"bibtex"`: BibTeX format (currently the only supported format)
+**NEW Features:**
+- **UUID-based duplicate detection**: Recognizes same files even when citation keys change
+- **Preserve manually added entries**: Entries without UUID are kept during merge
+- **Fallback for malformed BibTeX**: If parsing fails, preserves original content
+- **Enhanced JabRef metadata**: Generates comprehensive group metadata
+- **Better logging**: Detailed counts of new, updated, and preserved entries
 
 **Merge Behavior (overwrite=False):**
 - Reads existing `.bib` file if it exists
-- Preserves all existing entries
+- Parses all existing entries and preserves them
+- Detects existing entries by UUID to prevent duplicates
+- Entries without UUID (manually added) are preserved
 - Adds only new, non-duplicate entries
-- Duplicates are detected by citation keys
-- JabRef group metadata is preserved
-
-**Overwrite Behavior (overwrite=True):**
-- Replaces the entire output file
-- All existing entries are lost
-- Creates a fresh `.bib` file with only the new citations
-
-**Example:**
-```python
-from pathlib import Path
-from src.main import CitationExtractor
-
-extractor = CitationExtractor()
-citations = extractor.process_directory(Path("./papers"))
-
-# Export to BibTeX
-success = extractor.export_citations(
-    citations, 
-    Path("references.bib"),
-    format="bibtex"
-)
-
-if success:
-    print("Export successful!")
-```
+- Maintains JabRef group metadata from existing file
+- Writes all entries (existing + new) to the output file
 
 ---
 
 ##### `_generate_fallback_citation_key(pdf_path: Path) -> str`
 
-Generate a fallback citation key from PDF path when metadata extraction fails.
+**UPDATED in v0.2.0:** Generate a fallback citation key from PDF path.
 
 **Parameters:**
 - `pdf_path` (Path): Path to the PDF file
@@ -220,11 +240,13 @@ Generate a fallback citation key from PDF path when metadata extraction fails.
 **Returns:**
 - `str`: A valid BibTeX citation key based on the filename
 
+**NEW Format:** Simplified to just use cleaned filename stem without year suffix.
+
 **Key Generation:**
 - Extracts the filename stem (without extension)
-- Attempts to extract year from filename (patterns: `19xx`, `20xx`)
 - Cleans special characters for BibTeX compatibility
-- Format: `{CleanStem}_{YearOrYYYY}`
+- Removes spaces
+- Format: `{CleanStem}`
 
 **Example:**
 ```python
@@ -233,11 +255,13 @@ from src.main import CitationExtractor
 
 extractor = CitationExtractor()
 key = extractor._generate_fallback_citation_key(Path("Smith_2023_DeepLearning.pdf"))
-# Returns: "Smith_2023_DeepLearning_2023"
+# Returns: "Smith2023DeepLearning"
 
 key = extractor._generate_fallback_citation_key(Path("paper.pdf"))
-# Returns: "paper_YYYY" (no year found in filename)
+# Returns: "paper"
 ```
+
+---
 
 ##### `_write_failed_files_log(failed_files: List[Dict], output_path: Path) -> None`
 
@@ -246,14 +270,6 @@ Write a detailed log file of failed extractions.
 **Parameters:**
 - `failed_files` (List[Dict]): List of failure dictionaries from `_last_failed_files`
 - `output_path` (Path): Path to the output .bib file (log written to same directory)
-
-**Behavior:**
-- Creates `failed_extractions.log` in the output directory
-- Log file location:
-  - If `output_path` has a parent directory: uses that directory
-  - Otherwise: uses `config.output_directory` (default: `./output`)
-- Log format includes JabRef-specific instructions
-- Each failure entry includes: file path, group, would-be citation key, error reason
 
 **Failure Dictionary Structure:**
 ```python
@@ -266,24 +282,46 @@ Write a detailed log file of failed extractions.
 }
 ```
 
-**Example:**
-```python
-from pathlib import Path
-from src.main import CitationExtractor
+---
 
-extractor = CitationExtractor()
-failed = [
-    {
-        "path": "/papers/smith.pdf",
-        "relative_path": "smith.pdf",
-        "group": "General",
-        "error": "No DOI found",
-        "would_be_key": "smith_YYYY"
-    }
-]
-extractor._write_failed_files_log(failed, Path("output/refs.bib"))
-# Creates: output/failed_extractions.log
-```
+##### `_get_file_tracker(self, output_dir: Path) -> FileTracker`
+
+**NEW in v0.2.0:** Get or create file tracker for a specific output directory.
+
+**Parameters:**
+- `output_dir` (Path): Directory where the bib-file will be stored
+
+**Returns:**
+- FileTracker instance for the specified directory
+
+---
+
+##### `_process_pdf_with_tracking(self, pdf_path: Path, group_name: str, project_root: Path, file_tracker: FileTracker) -> Optional[Dict]`
+
+**NEW in v0.2.0:** Process a single PDF file with file tracking.
+
+**Parameters:**
+- `pdf_path` (Path): Path to the PDF file
+- `group_name` (str): Group name for the file
+- `project_root` (Path): Root directory for relative path calculation
+- `file_tracker` (FileTracker): FileTracker instance
+
+**Returns:**
+- Metadata dictionary with UUID, or the failure dict from process_pdf
+
+---
+
+##### `_ensure_unique_citation_key(self, base_key: str, existing_keys: set, new_keys: set) -> str`
+
+**NEW in v0.2.0:** Ensure a citation key is unique by appending 'a', 'b', etc. if needed.
+
+**Parameters:**
+- `base_key` (str): The base citation key (e.g., "Author2023")
+- `existing_keys` (set): Set of keys that already exist in the file
+- `new_keys` (set): Set of keys already added in this batch
+
+**Returns:**
+- `str`: Unique citation key
 
 ---
 
@@ -303,16 +341,7 @@ CrossRefClient(email: Optional[str] = None)
 **Parameters:**
 - `email` (Optional[str]): Email address for CrossRef polite pool. Providing an email gives you access to the polite pool with higher rate limits.
 
-**Example:**
-```python
-from src.api_clients import CrossRefClient
-
-# Public pool (no email)
-client = CrossRefClient()
-
-# Polite pool (with email)
-client = CrossRefClient(email="researcher@example.com")
-```
+---
 
 #### Methods
 
@@ -346,19 +375,6 @@ Fetch metadata for a DOI from CrossRef.
 }
 ```
 
-**Example:**
-```python
-from src.api_clients import CrossRefClient
-
-client = CrossRefClient(email="user@example.com")
-metadata = client.get_metadata("10.1038/nature12373")
-
-if metadata:
-    print(f"Title: {metadata['title']}")
-    print(f"Authors: {metadata['author']}")
-    print(f"Published in: {metadata['journal']} ({metadata['year']})")
-```
-
 ---
 
 ##### `search_by_title(title: str, limit: int = 5) -> list`
@@ -371,20 +387,6 @@ Search CrossRef by title when DOI is not available.
 
 **Returns:**
 - `list`: List of metadata dictionaries (potential matches)
-
-**Example:**
-```python
-from src.api_clients import CrossRefClient
-
-client = CrossRefClient()
-matches = client.search_by_title("Deep Learning Survey", limit=3)
-
-for match in matches:
-    print(f"Title: {match.get('title')}")
-    print(f"DOI: {match.get('doi')}")
-    print(f"Year: {match.get('year')}")
-    print("---")
-```
 
 ---
 
@@ -401,12 +403,7 @@ for match in matches:
 PDFMetadataExtractor()
 ```
 
-**Example:**
-```python
-from src.extractors import PDFMetadataExtractor
-
-extractor = PDFMetadataExtractor()
-```
+---
 
 #### Methods
 
@@ -418,30 +415,7 @@ Extract metadata from a PDF file.
 - `pdf_path` (Path): Path to the PDF file
 
 **Returns:**
-- `Dict[str, Optional[str]]`: Dictionary containing metadata fields:
-  - `title`: Document title
-  - `author`: Author information
-  - `subject`: Subject/description
-  - `keywords`: Keywords
-  - `creator`: Creator application
-  - `producer`: Producer application
-  - `creation_date`: Creation timestamp
-  - `mod_date`: Modification timestamp
-  - `doi`: DOI if found in metadata
-
-**Example:**
-```python
-from pathlib import Path
-from src.extractors import PDFMetadataExtractor
-
-extractor = PDFMetadataExtractor()
-metadata = extractor.extract(Path("paper.pdf"))
-
-print("PDF Metadata:")
-for key, value in metadata.items():
-    if value:
-        print(f"  {key}: {value}")
-```
+- `Dict[str, Optional[str]]`: Dictionary containing metadata fields
 
 ---
 
@@ -454,19 +428,6 @@ Check if metadata contains useful information.
 
 **Returns:**
 - `bool`: True if at least `title` or `author` is present and non-empty
-
-**Example:**
-```python
-from src.extractors import PDFMetadataExtractor
-
-extractor = PDFMetadataExtractor()
-metadata = extractor.extract(Path("paper.pdf"))
-
-if extractor.has_useful_metadata(metadata):
-    print("This PDF has useful metadata")
-else:
-    print("Metadata is insufficient")
-```
 
 ---
 
@@ -484,16 +445,7 @@ DOIExtractor(scan_pages: int = 3)
 **Parameters:**
 - `scan_pages` (int): Number of pages to scan for DOI (default: 3)
 
-**Example:**
-```python
-from src.extractors import DOIExtractor
-
-# Scan first 3 pages (default)
-extractor = DOIExtractor()
-
-# Scan first 5 pages
-extractor = DOIExtractor(scan_pages=5)
-```
+---
 
 #### Methods
 
@@ -507,26 +459,6 @@ Extract a single DOI from PDF file.
 **Returns:**
 - `Optional[str]`: DOI string if found, None otherwise
 
-**Behavior:**
-- Opens PDF and scans the first N pages (as configured)
-- Uses regex patterns to find DOI identifiers
-- Returns the first DOI found
-- Closes the PDF file after extraction
-
-**Example:**
-```python
-from pathlib import Path
-from src.extractors import DOIExtractor
-
-extractor = DOIExtractor()
-doi = extractor.extract(Path("paper.pdf"))
-
-if doi:
-    print(f"Found DOI: {doi}")
-else:
-    print("No DOI found in the first 3 pages")
-```
-
 ---
 
 ##### `extract_multiple(pdf_path: Path) -> List[str]`
@@ -538,21 +470,6 @@ Extract all DOIs found in a PDF.
 
 **Returns:**
 - `List[str]`: List of unique DOI strings found in the PDF
-
-**Use Case:** Extract DOIs from reference lists in papers
-
-**Example:**
-```python
-from pathlib import Path
-from src.extractors import DOIExtractor
-
-extractor = DOIExtractor()
-dois = extractor.extract_multiple(Path("review_paper.pdf"))
-
-print(f"Found {len(dois)} DOIs in references:")
-for doi in dois:
-    print(f"  - {doi}")
-```
 
 ---
 
@@ -580,26 +497,7 @@ GROBIDClient(grobid_url: str = "http://localhost:8070")
 **Parameters:**
 - `grobid_url` (str): URL of GROBID service (default: "http://localhost:8070")
 
-**Attributes:**
-- `grobid_url` (str): The configured GROBID URL
-- `available` (bool): Whether the GROBID service is reachable (checked on init)
-
-**Example:**
-```python
-from src.extractors import GROBIDClient
-
-# Using default URL (localhost:8070)
-client = GROBIDClient()
-
-# Using custom URL
-client = GROBIDClient(grobid_url="http://grobid.example.com:8070")
-
-# Check if service is available
-if client.available:
-    print("GROBID service is running!")
-else:
-    print("GROBID service is not available")
-```
+---
 
 #### Methods
 
@@ -613,28 +511,6 @@ Process PDF using GROBID service to extract metadata.
 **Returns:**
 - `Optional[Dict]`: Citation metadata dictionary, or None if processing failed
 
-**Behavior:**
-- Checks if GROBID service is available
-- Validates PDF file exists
-- Sends PDF to GROBID via HTTP POST
-- Parses TEI XML response
-- Returns normalized metadata
-
-**Example:**
-```python
-from pathlib import Path
-from src.extractors import GROBIDClient
-
-client = GROBIDClient()
-
-if client.available:
-    metadata = client.process(Path("paper.pdf"))
-    if metadata:
-        print(f"Title: {metadata.get('title')}")
-        print(f"Authors: {metadata.get('author')}")
-        print(f"Year: {metadata.get('year')}")
-```
-
 ---
 
 ##### `is_available() -> bool`
@@ -643,17 +519,6 @@ Check if GROBID service is available.
 
 **Returns:**
 - `bool`: True if service responds to health check
-
-**Example:**
-```python
-from src.extractors import GROBIDClient
-
-client = GROBIDClient()
-if client.is_available():
-    print("GROBID is ready!")
-else:
-    print("Start GROBID service first")
-```
 
 ---
 
@@ -670,12 +535,7 @@ else:
 BibTeXExporter()
 ```
 
-**Example:**
-```python
-from src.exporters import BibTeXExporter
-
-exporter = BibTeXExporter()
-```
+---
 
 #### Methods
 
@@ -690,28 +550,6 @@ Export citations to a BibTeX file.
 **Returns:**
 - `bool`: True if export successful, False otherwise
 
-**Example:**
-```python
-from pathlib import Path
-from src.exporters import BibTeXExporter
-
-exporter = BibTeXExporter()
-
-citations = [
-    {
-        "title": "Deep Learning",
-        "author": "John Doe",
-        "year": "2020",
-        "journal": "Nature",
-        "doi": "10.1038/example"
-    }
-]
-
-success = exporter.export(citations, Path("output.bib"))
-if success:
-    print("Exported successfully!")
-```
-
 ---
 
 ##### `export_single(metadata: Dict) -> str`
@@ -724,61 +562,312 @@ Export a single citation to a BibTeX string.
 **Returns:**
 - `str`: BibTeX formatted string
 
-**Example:**
-```python
-from src.exporters import BibTeXExporter
-
-exporter = BibTeXExporter()
-
-metadata = {
-    "title": "A Great Paper",
-    "author": "Jane Smith",
-    "year": "2021",
-    "journal": "Science"
-}
-
-bibtex_str = exporter.export_single(metadata)
-print(bibtex_str)
-```
-
-**Output:**
-```bibtex
-@article{Smith_2021_Great,
-  author = {Jane Smith},
-  title = {A Great Paper},
-  year = {2021},
-  journal = {Science}
-}
-```
-
 ---
 
 ##### `_generate_citation_key(metadata: Dict) -> str`
 
-Generate a citation key from metadata.
+**UPDATED in v0.2.0:** Generate a base citation key from metadata.
+
+**NEW Format:** `FirstAuthorLastNameYear` (without underscores)
 
 **Parameters:**
 - `metadata` (Dict): Citation metadata
 
 **Returns:**
-- `str`: Citation key string
-
-**Format:** `FirstAuthorLastName_Year_FirstTitleWord`
+- `str`: Base citation key string
 
 **Example:**
 ```python
-from src.exporters import BibTeXExporter
-
-exporter = BibTeXExporter()
-
 metadata = {
     "author": "John Doe and Jane Smith",
     "year": "2020",
     "title": "The Impact of Machine Learning on Society"
 }
-
 key = exporter._generate_citation_key(metadata)
-# Returns: "Doe_2020_Impact"
+# Returns: "Doe2020"
+```
+
+---
+
+##### `_create_bibtex_entry(metadata: Dict) -> Dict`
+
+Create a BibTeX entry from metadata.
+
+**NEW in v0.2.0:** Now includes `pdf_uuid` field if present in metadata for file tracking.
+
+---
+
+##### `_generate_jabref_group_metadata(citations: List[Dict]) -> str`
+
+**NEW in v0.2.0:** Generate JabRef group metadata as @Comment entries.
+
+**Parameters:**
+- `citations` (List[Dict]): List of citation metadata dictionaries
+
+**Returns:**
+- `str`: String containing JabRef group metadata, or empty string if no groups
+
+**Purpose:** Creates native JabRef groups that are displayed in the JabRef UI.
+
+---
+
+##### `_extract_existing_jabref_metadata(content: str) -> str`
+
+**NEW in v0.2.0:** Extract JabRef metadata comments from existing BibTeX file content.
+
+**Parameters:**
+- `content` (str): The raw content of the .bib file
+
+**Returns:**
+- `str`: String containing JabRef metadata comments, or empty string if none found
+
+---
+
+## Trackers
+
+### `FileTracker`
+
+**NEW in v0.2.0:** File tracking system for persistent PDF-to-BibTeX identification.
+
+**Module:** `src.trackers.file_tracker`  
+**Purpose:** Tracks PDF files and their UUIDs for persistent identification across citation key changes
+
+#### Constructor
+
+```python
+FileTracker(output_dir: Union[Path, str])
+```
+
+**Parameters:**
+- `output_dir` (Union[Path, str]): Directory where the bib-file is stored. The tracker file (`.pdf_tracker.json`) will be created here.
+
+**Attributes:**
+- `output_dir` (Path): The output directory
+- `tracker_path` (Path): Path to the `.pdf_tracker.json` file
+- `entries` (Dict[str, FileTrackerEntry]): Dictionary of all tracked entries by UUID
+
+**Example:**
+```python
+from src.trackers import FileTracker
+from pathlib import Path
+
+# Create tracker for output directory
+tracker = FileTracker(output_dir=Path("./output"))
+```
+
+#### Methods
+
+##### `generate_uuid(file_path: Path) -> str`
+
+Generate a deterministic UUID for a file.
+
+**Parameters:**
+- `file_path` (Path): Path to the PDF file
+
+**Returns:**
+- `str`: Deterministic UUID string
+
+**Behavior:**
+- UUID is based on absolute path, last modified time, and file size
+- Same file always gets the same UUID
+- Uses UUID5 with NAMESPACE_URL for generation
+
+---
+
+##### `get_file_hash(file_path: Path) -> str`
+
+Calculate SHA-256 hash of file content.
+
+**Parameters:**
+- `file_path` (Path): Path to the file
+
+**Returns:**
+- `str`: Hex-encoded SHA-256 hash
+
+---
+
+##### `register_file(file_path: Path, citation_key: str, project_root: Optional[Path] = None, metadata: Optional[Dict] = None) -> Tuple[str, bool]`
+
+**Main Method:** Register a file and get its UUID.
+
+**Parameters:**
+- `file_path` (Path): Path to the PDF file
+- `citation_key` (str): Current citation key for the BibTeX entry
+- `project_root` (Optional[Path]): Root directory for calculating relative paths
+- `metadata` (Optional[Dict]): Optional additional metadata to store (e.g., group, source)
+
+**Returns:**
+- `Tuple[str, bool]`: Tuple of (uuid, is_new) where is_new is True if this is the first time the file is being tracked
+
+**Example:**
+```python
+uuid, is_new = tracker.register_file(
+    file_path=Path("/path/to/paper.pdf"),
+    citation_key="Author2023Title",
+    project_root=Path("/path/to/project"),
+    metadata={"group": "MachineLearning", "source": "crossref"}
+)
+print(f"UUID: {uuid}, Is new: {is_new}")
+```
+
+---
+
+##### `get_uuid_by_path(file_path: Path) -> Optional[str]`
+
+Get UUID for a given file path.
+
+**Parameters:**
+- `file_path` (Path): Path to look up
+
+**Returns:**
+- `Optional[str]`: UUID string or None if not found
+
+---
+
+##### `get_entry_by_path(file_path: Path) -> Optional[FileTrackerEntry]`
+
+Get full entry for a given file path.
+
+**Parameters:**
+- `file_path` (Path): Path to look up
+
+**Returns:**
+- `Optional[FileTrackerEntry]`: FileTrackerEntry or None if not found
+
+---
+
+##### `get_path_by_uuid(uuid: str) -> Optional[Path]`
+
+Get file path for a given UUID.
+
+**Parameters:**
+- `uuid` (str): UUID to look up
+
+**Returns:**
+- `Optional[Path]`: Path or None if not found
+
+---
+
+##### `get_entry(uuid: str) -> Optional[FileTrackerEntry]`
+
+Get full entry for a UUID.
+
+**Parameters:**
+- `uuid` (str): UUID to look up
+
+**Returns:**
+- `Optional[FileTrackerEntry]`: FileTrackerEntry or None
+
+---
+
+##### `update_citation_key(uuid: str, new_citation_key: str) -> bool`
+
+Update citation key for a tracked file.
+
+**Purpose:** Useful when citation keys change in JabRef or other tools.
+
+**Parameters:**
+- `uuid` (str): UUID of the file
+- `new_citation_key` (str): New citation key
+
+**Returns:**
+- `bool`: True if updated successfully, False if UUID not found
+
+---
+
+##### `list_all_entries() -> List[FileTrackerEntry]`
+
+Get all tracked entries.
+
+**Returns:**
+- `List[FileTrackerEntry]`: List of all FileTrackerEntry objects
+
+---
+
+##### `remove_file(file_path: Path) -> bool`
+
+Remove a file from tracking.
+
+**Parameters:**
+- `file_path` (Path): Path to remove
+
+**Returns:**
+- `bool`: True if removed successfully, False if not found
+
+---
+
+##### `cleanup_missing_files() -> int`
+
+Remove entries for files that no longer exist.
+
+**Purpose:** This should be called periodically to keep the tracker clean.
+
+**Returns:**
+- `int`: Number of entries removed
+
+---
+
+##### `get_files_by_group(group_name: str) -> List[FileTrackerEntry]`
+
+Get all entries that belong to a specific group.
+
+**Parameters:**
+- `group_name` (str): Group name to filter by
+
+**Returns:**
+- `List[FileTrackerEntry]`: List of entries in the specified group
+
+---
+
+##### `get_updated_files(since: Optional[str] = None) -> List[FileTrackerEntry]`
+
+Get files that have been updated since a specific time.
+
+**Parameters:**
+- `since` (Optional[str]): ISO timestamp string. If None, returns all files.
+
+**Returns:**
+- `List[FileTrackerEntry]`: List of entries updated since the specified time
+
+---
+
+##### `reset() -> None`
+
+Clear all tracked entries.
+
+**WARNING:** This will remove all tracking data!
+
+---
+
+### `FileTrackerEntry`
+
+**NEW in v0.2.0:** Data class representing a tracked file entry.
+
+**Module:** `src.trackers.file_tracker`  
+**Type:** `dataclass`
+
+**Attributes:**
+- `uuid` (str): Unique identifier for this file (deterministic)
+- `file_path` (str): Absolute path to the file
+- `relative_path` (str): Path relative to project root (for portability)
+- `file_hash` (str): SHA-256 hash of file content
+- `file_size` (int): Size of file in bytes
+- `last_modified` (str): ISO timestamp of last file modification
+- `citation_key` (str): Current BibTeX citation key
+- `first_seen` (str): ISO timestamp when file was first tracked
+- `last_seen` (str): ISO timestamp when file was last processed
+- `metadata` (Dict): Additional metadata dictionary (e.g., group, source)
+
+**Example:**
+```python
+from src.trackers import FileTracker, FileTrackerEntry
+
+# Access entry fields
+entry: FileTrackerEntry = tracker.get_entry("some-uuid")
+print(f"UUID: {entry.uuid}")
+print(f"File: {entry.file_path}")
+print(f"Citation Key: {entry.citation_key}")
+print(f"Group: {entry.metadata.get('group')}")
 ```
 
 ---
@@ -824,6 +913,11 @@ MetadataDict = TypedDict('MetadataDict', {
     # System fields
     'source': Optional[str],  # "embedded", "crossref", "grobid"
     'pdf_file': Optional[str]  # Original filename
+    
+    # NEW in v0.2.0: File tracking
+    'pdf_uuid': Optional[str],  # UUID for persistent identification
+    'group': Optional[str],     # Group name for organization
+    'group_path': Optional[str] # Path to group directory
 }, total=False)
 ```
 
@@ -901,6 +995,10 @@ from src.extractors.grobid_client import GROBIDClient
 # Exporters
 from src.exporters import BibTeXExporter
 from src.exporters.bibtex import BibTeXExporter
+
+# Trackers (NEW in v0.2.0)
+from src.trackers import FileTracker, FileTrackerEntry
+from src.trackers.file_tracker import FileTracker, FileTrackerEntry
 ```
 
 ---
@@ -914,6 +1012,27 @@ from src.exporters.bibtex import BibTeXExporter
 | 3.10 | ✓ | Fully supported |
 | 3.11 | ✓ | Fully supported |
 | 3.12 | ? | Not tested |
+
+---
+
+## Changelog
+
+### v0.2.0 (2026-10-21)
+- **NEW**: FileTracker system for persistent PDF-to-BibTeX identification
+- **NEW**: `trackers` module with `FileTracker` and `FileTrackerEntry` classes
+- **NEW**: CLI options `--show-tracker` and `--cleanup-tracker`
+- **NEW**: UUID-based merge logic in BibTeX exporter
+- **NEW**: JabRef group metadata generation
+- **NEW**: Methods in `CitationExtractor`: `_get_file_tracker`, `_process_pdf_with_tracking`, `_ensure_unique_citation_key`
+- **UPDATED**: `process_directory` now accepts `output_path` parameter
+- **UPDATED**: Fallback citation key generation (simplified format)
+- **UPDATED**: `BibTeXExporter` includes UUID support and enhanced metadata
+
+### v0.1.0 (2026-10-20)
+- Initial release with embedded metadata, DOI lookup, and GROBID support
+- Basic merge functionality
+- Failed files logging
+- CLI interface
 
 ---
 

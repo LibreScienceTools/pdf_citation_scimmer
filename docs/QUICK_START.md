@@ -1,7 +1,7 @@
 # PDF Citation Extractor - Quick Start Guide
 
-**Version:** 0.1.0  
-**Last Updated:** 2026-10-20
+**Version:** 0.2.0  
+**Last Updated:** 2026-10-21
 
 ---
 
@@ -31,380 +31,550 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-### Install with pip
-
-```bash
-# From the project directory
-pip install .
-
-# Or directly from GitHub (if published)
-pip install git+https://github.com/yourusername/pdf_citation_skimmer.git
-```
-
 ---
 
 ## Basic Usage
 
-### Process a Single PDF
-
-```bash
-# Using Python module
-python -m src.main --pdf paper.pdf --output citation.bib
-
-# Using installed command (if installed)
-pdf-citation-extract --pdf paper.pdf --output citation.bib
-```
-
 ### Process a Directory of PDFs
 
 ```bash
-# Process all PDFs in a directory
+# Process all PDFs in a directory and create references.bib
 python -m src.main --dir ./papers --output references.bib
 
-# With verbose logging
+# Process with verbose logging
 python -m src.main --dir ./papers --output references.bib --verbose
 ```
 
-### Use Custom Configuration
+### Process a Single PDF
 
 ```bash
-# Create a custom config file
-cp config.yaml my_config.yaml
-# Edit my_config.yaml with your settings
+# Process a single PDF file
+python -m src.main --pdf paper.pdf --output citation.bib
+```
 
-# Use custom config
-python -m src.main --dir ./papers --config my_config.yaml
+### Custom Configuration
+
+```bash
+# Use a custom config file
+python -m src.main --dir ./papers --config my_config.yaml --output refs.bib
+```
+
+---
+
+## NEW in v0.2.0: File Tracking Features
+
+### Automatic File Tracking
+
+The PDF Citation Extractor now automatically tracks your PDF files using unique identifiers (UUIDs). This provides several benefits:
+
+1. **Persistent Identification**: Files are identified by UUID, not just citation keys
+2. **Smart Merge**: Prevents duplicate entries even when citation keys change
+3. **Missing File Cleanup**: Automatically removes entries for deleted files
+4. **Cross-Session Tracking**: Maintains tracking information across different runs
+
+### View Tracked Files
+
+```bash
+# Show all tracked files for a specific bib file
+python -m src.main --output references.bib --show-tracker
+
+# Output shows: UUID, file path, citation key, timestamps
+```
+
+### Clean Up Missing Files
+
+```bash
+# Remove entries for files that no longer exist
+python -m src.main --output references.bib --cleanup-tracker
+```
+
+### Tracker File Location
+
+The tracker stores a `.pdf_tracker.json` file in the same directory as your output `.bib` file. This file contains:
+- UUID for each tracked file
+- File paths (absolute and relative)
+- File hashes (SHA-256)
+- Citation keys
+- Timestamps
+- Additional metadata (group, source, etc.)
+
+**Example tracker file location:**
+```
+output/
+├── references.bib
+└── .pdf_tracker.json    # <- Tracker file
+```
+
+---
+
+## Manual Entry Preservation
+
+### The Problem This Solves
+
+You want to use the PDF Citation Extractor for most of your PDFs, but some files might:
+- Have poor or missing metadata
+- Be from sources without DOIs
+- Require manual data entry
+
+**Solution**: The scimmer now **preserves manually added JabRef entries** while managing automatically extracted ones.
+
+### How It Works
+
+The scimmer distinguishes between two types of entries:
+
+| Entry Type | Has `pdf_uuid` Field? | Managed By | Preservation |
+|------------|----------------------|------------|--------------|
+| **Auto** (from PDFs) | ✅ Yes | Scimmer | Updated on re-processing |
+| **Manual** (from JabRef) | ❌ No | You | **ALWAYS preserved** |
+
+**This means you can safely mix automatic and manual workflows!**
+
+### Complete Workflow Example
+
+#### Step 1: Process Your PDFs
+```bash
+python -m src.main --dir ./papers --output references.bib
+```
+
+**Result:**
+- ✅ Successfully processed PDFs → Added to `references.bib` with `pdf_uuid` fields
+- ❌ Failed PDFs → Logged in `output/failed_extractions.log`
+
+#### Step 2: Check for Failed Files
+```bash
+cat output/failed_extractions.log
+```
+
+You'll see clear instructions like:
+```
+File #1: difficult_paper.pdf
+  Group: General
+  Suggested BibTeX Key: difficultpaper
+  Reason: No metadata extracted from any source
+
+  ACTION REQUIRED: Add this file manually to JabRef!
+  - BibTeX key: difficultpaper
+  - Group: General
+```
+
+#### Step 3: Add Manual Entries in JabRef
+1. Open `references.bib` in JabRef
+2. For each failed file, create a new entry:
+   - Use the **Suggested BibTeX Key** as the citation key
+   - Add to the specified **Group**
+   - Fill in metadata manually (title, author, year, etc.)
+3. Save the file
+
+**Note**: These manual entries will NOT have a `pdf_uuid` field - that's how the scimmer recognizes them!
+
+#### Step 4: Add More PDFs Later
+```bash
+python -m src.main --dir ./new_papers --output references.bib
+```
+
+**Result:**
+- ✅ New PDFs → Added to `references.bib` with `pdf_uuid` fields
+- ✅ Existing auto entries → Updated if needed
+- ✅ **Manual entries → PRESERVED EXACTLY AS YOU ADDED THEM**
+
+### What You'll See in the CLI
+
+```
+✅ Successfully exported to references.bib
+
+Summary:
+  - New auto-extracted citations: 15
+  - Groups: 3
+    - General: 5 citations
+    - MachineLearning: 7 citations
+    - Neuroscience: 3 citations
+  - Output format: bibtex
+  - Output file: references.bib
+  - Manual entries preserved: 2
+  - Total entries in file: 17 (15 auto + 2 manual)
+
+⚠️  3 files failed extraction.
+   These MUST be added manually to JabRef.
+   See 'output/failed_extractions.log' for detailed instructions.
+   Manually added entries will be preserved in future runs.
+```
+
+### Key Benefits
+
+1. **No data loss**: Manual entries are never accidentally removed
+2. **Predictable**: Clear separation between auto and manual entries
+3. **Transparent**: You know exactly what's happening
+4. **Flexible**: Use automatic extraction when it works, manual entry when it doesn't
+5. **Safe**: Default behavior preserves your manual work
+
+### What Happens If...
+
+| Scenario | Result |
+|----------|--------|
+| I add a manual entry with the same key as an auto entry | Manual entry is preserved, auto entry gets a unique key |
+| I run with `--overwrite` | Manual entries are removed (you explicitly requested a clean slate) |
+| I process the same PDF twice | Recognized by UUID, metadata updated but citation key preserved |
+| I delete a manual entry in JabRef | Entry is removed (as expected) |
+| I add a manual entry for a file that later gets processed | Manual entry is preserved (you might want to remove it manually) |
+
+### Best Practices
+
+1. **Always check the failed files log** after running the scimmer
+2. **Use the suggested BibTeX keys** for consistency
+3. **Add manual entries to the correct groups** for organization
+4. **Run without `--overwrite`** to preserve your manual work
+5. **Use `--overwrite` only when you want to start fresh**
+
+---
+
+## Advanced Usage
+
+### Overwrite Existing File
+
+By default, the tool merges new citations with existing ones. To overwrite:
+
+```bash
+python -m src.main --dir ./papers --output references.bib --overwrite
+```
+
+### Organize by Groups
+
+The tool automatically organizes citations by subdirectory:
+
+```
+papers/
+├── General/
+│   ├── paper1.pdf
+│   └── paper2.pdf
+├── MachineLearning/
+│   ├── ml_paper1.pdf
+│   └── ml_paper2.pdf
+└── Neuroscience/
+    └── neuro_paper.pdf
+```
+
+When exported, citations will be grouped in the `.bib` file with comments:
+```bibtex
+% ===== Group: General =====
+
+@article{...}
+
+% ===== Group: MachineLearning =====
+
+@article{...}
+
+% ===== Group: Neuroscience =====
+
+@article{...}
+```
+
+### Use GROBID for Advanced Extraction
+
+GROBID is a machine learning service that can extract metadata from PDFs without proper embedded metadata:
+
+```bash
+# 1. Install Docker: https://docs.docker.com/get-docker/
+
+# 2. Run GROBID service
+docker pull lfoppiano/grobid:0.8.0
+docker run -t --rm -p 8070:8070 lfoppiano/grobid:0.8.0
+
+# 3. Enable GROBID in config.yaml
+extraction:
+  strategy:
+    - "embedded_metadata"
+    - "doi_lookup"
+    - "grobid"  # Add this line
+
+# 4. Process PDFs with GROBID
+python -m src.main --dir ./papers --output references.bib
 ```
 
 ---
 
 ## Configuration
 
-### Quick Configuration Reference
+### Default Configuration
 
-| Setting | Config Key | Default | Description |
-|---------|------------|---------|-------------|
-| CrossRef Email | `crossref_email` | `""` | Email for polite pool access |
-| Output Format | `default_output_format` | `"bibtex"` | Export format (bibtex only) |
-| Output Directory | `output_directory` | `"./output"` | Where to save output files |
-| DOI Scan Pages | `extraction.doi_scan_pages` | `3` | Pages to scan for DOI |
-| GROBID URL | `grobid_url` | `"http://localhost:8070"` | GROBID service URL |
-| Strategies | `extraction.strategy` | `["embedded_metadata", "doi_lookup"]` | Extraction methods to try |
+The tool uses sensible defaults. Create a `config.yaml` file for customization:
 
-### Enable GROBID
+```yaml
+# Email for CrossRef API (polite pool - faster response)
+# Leave empty for public pool
+crossref_email: ""
 
-GROBID is a machine learning service for extracting bibliographic data from PDFs.
+# Output settings
+default_output_format: "bibtex"
+output_directory: "./output"
 
-```bash
-# Install Docker (if not already installed)
-# See: https://docs.docker.com/get-docker/
-
-# Pull GROBID image
-docker pull lfoppiano/grobid:0.8.0
-
-# Run GROBID service
-docker run -t --rm -p 8070:8070 lfoppiano/grobid:0.8.0
-
-# Verify it's running
-curl http://localhost:8070/api/isalive
-# Should return: true
-
-# Enable GROBID in config.yaml
-# In config.yaml, add "grobid" to the strategy list:
+# Extraction settings
 extraction:
+  # Number of pages to scan for DOI
+  doi_scan_pages: 3
+
+  # Fallback strategy order
   strategy:
     - "embedded_metadata"
     - "doi_lookup"
-    - "grobid"
+    - "grobid"  # Requires GROBID Docker service
 
-# Process PDFs with GROBID
-python -m src.main --dir ./papers --output references.bib
+# GROBID service URL
+grobid_url: "http://localhost:8070"
 ```
+
+### Strategy Order
+
+The tool tries extraction strategies in order. First successful strategy is used:
+
+1. **embedded_metadata**: Fastest, uses PDF document properties
+2. **doi_lookup**: Scans PDF for DOI and queries CrossRef
+3. **grobid**: Machine learning service (requires Docker)
 
 ---
 
-## Examples
+## Output Files
 
-### Example 1: Extract metadata from a single paper
+### Main Output: .bib File
 
-```bash
-python -m src.main --pdf "Smith_2020_DeepLearning.pdf" --output smith_2020.bib
-```
+The primary output is a BibTeX file (`.bib`) that can be imported into:
+- JabRef
+- Zotero
+- Citavi
+- LaTeX editors
+- Any reference manager that supports BibTeX
 
-### Example 2: Process an entire research library
-
-```bash
-# Process all PDFs in your papers directory
-python -m src.main --dir ~/Documents/Papers --output library.bib
-
-# Check the log for details
-cat pdf_citation_extractor.log
-```
-
-### Example 3: Use CrossRef polite pool (faster access)
-
-Edit `config.yaml`:
-```yaml
-crossref_email: "your.email@example.com"
-```
-
-Then run:
-```bash
-python -m src.main --dir ./papers --output references.bib --config config.yaml
-```
-
-### Example 4: Get verbose output
-
-```bash
-python -m src.main --pdf paper.pdf --output citation.bib --verbose
-```
-
----
-
-## Output Format
-
-### BibTeX Output Example
-
-For a paper with the following metadata:
-- Title: "Deep Learning for Computer Vision"
-- Authors: "John Doe and Jane Smith"
-- Year: 2020
-- Journal: "IEEE Transactions on Pattern Analysis"
-- DOI: 10.1109/TPAMI.2020.123456
-
-The output `citations.bib` will contain:
-
+**Example output:**
 ```bibtex
-@article{Doe_2020_Deep,
-  author = {John Doe and Jane Smith},
-  title = {Deep Learning for Computer Vision},
-  year = {2020},
-  journal = {IEEE Transactions on Pattern Analysis},
-  doi = {10.1109/TPAMI.2020.123456}
+@Comment{jabref-meta: databaseType:bibtex;}
+
+@Comment{jabref-meta: grouping:
+0 AllEntriesGroup:;
+1 StaticGroup:General\;0\;1\;0x8a8a8aff\;\;\;;
+1 StaticGroup:MachineLearning\;0\;1\;0x8a8a8aff\;\;\;;
 }
+
+% ===== Group: General =====
+
+@article{Doe2023,
+  author = {John Doe and Jane Smith},
+  title = {Deep Learning Survey},
+  year = {2023},
+  journal = {Nature AI},
+  volume = {1},
+  pages = {1-10},
+  doi = {10.1038/example},
+  pdf_uuid = {abc123def456...}
+}
+```
+
+### Failed Files Log
+
+When extraction fails for some PDFs, a `failed_extractions.log` file is created in the output directory:
+
+```
+# PDF Citation Extraction - Failed Files
+# Generated: 2026-10-21 14:30:45
+# Output file: references.bib
+#
+# How to use this file with JabRef:
+#   1. Open your .bib file in JabRef
+#   2. For each failed file below, manually create an entry
+#   3. Use the 'Would-be Citation Key' as the entry's BibTeX key
+#   4. Add the entry to the specified 'Group'
+#
+# Total failed: 2
+
+## Failed File #1
+- **File**: problematic_paper.pdf
+- **Group**: General
+- **Would-be Citation Key**: problematicpaper
+- **Reason**: No metadata extracted from any source (no DOI, no embedded metadata, GROBID unavailable)
+- **Action**: Create entry manually in JabRef with key 'problematicpaper'
+
+## Failed File #2
+- **File**: corrupted.pdf
+- **Group**: MachineLearning
+- **Would-be Citation Key**: corrupted
+- **Reason**: PDF file is corrupted or encrypted
+- **Action**: Create entry manually in JabRef with key 'corrupted'
+```
+
+---
+
+## Programmatic Usage
+
+### Basic Example
+
+```python
+from pathlib import Path
+from src.main import CitationExtractor
+
+# Initialize extractor
+extractor = CitationExtractor()
+
+# Process a single PDF
+metadata = extractor.process_pdf(Path("paper.pdf"))
+print(metadata)
+
+# Process a directory with file tracking
+citations = extractor.process_directory(
+    Path("./papers"), 
+    output_path=Path("references.bib")
+)
+
+# Export to BibTeX
+extractor.export_citations(citations, Path("references.bib"))
+```
+
+### Handle Failed Extractions
+
+```python
+from pathlib import Path
+from src.main import CitationExtractor
+
+extractor = CitationExtractor()
+
+# Process directory
+citations = extractor.process_directory(Path("./papers"))
+
+# Check for failures
+if extractor._last_failed_files:
+    print(f"Failed to extract {len(extractor._last_failed_files)} files")
+    for failure in extractor._last_failed_files:
+        print(f"  {failure['relative_path']}: {failure['error']}")
+        print(f"    Suggested key: {failure['would_be_key']}")
+```
+
+### Use File Tracker Directly
+
+```python
+from pathlib import Path
+from src.trackers import FileTracker
+
+# Create tracker
+tracker = FileTracker(output_dir=Path("./output"))
+
+# Register a file
+uuid, is_new = tracker.register_file(
+    Path("paper.pdf"),
+    citation_key="Author2023Title",
+    project_root=Path("."),
+    metadata={"group": "General", "source": "embedded"}
+)
+
+# List all tracked files
+all_entries = tracker.list_all_entries()
+for entry in all_entries:
+    print(f"UUID: {entry.uuid}")
+    print(f"  File: {entry.file_path}")
+    print(f"  Key: {entry.citation_key}")
+    print(f"  Group: {entry.metadata.get('group')}")
+
+# Clean up missing files
+removed = tracker.cleanup_missing_files()
+print(f"Removed {removed} missing entries")
 ```
 
 ---
 
 ## Troubleshooting
 
-### Common Issues
+### No Metadata Extracted
 
-#### Issue: "No PDF files found in directory"
-**Solution:** Ensure the directory path is correct and contains `.pdf` files (case-sensitive).
+If the tool can't extract metadata from your PDFs:
 
-```bash
-# Check if PDFs exist
-ls ./papers/*.pdf
-```
+1. **Check PDF quality**: Some PDFs have minimal or no metadata
+2. **Enable DOI scanning**: Make sure `doi_scan_pages` is set high enough
+3. **Try GROBID**: Enable GROBID for advanced extraction
+4. **Check file permissions**: Ensure the tool can read your PDF files
+5. **Use verbose mode**: Run with `--verbose` to see detailed processing information
 
-#### Issue: "Could not extract sufficient metadata"
-**Solution:** The PDF may not have embedded metadata or a visible DOI. Try:
-- Enable GROBID in your strategy list
-- Manually add the DOI to the PDF if you know it
-- Check `failed_extractions.log` in your output directory for details on which files failed
+### CrossRef API Issues
 
-**Note:** When extraction fails, a log file `failed_extractions.log` is automatically created in your output directory. This file contains:
-- List of all failed PDFs
-- Their would-be citation keys (for JabRef)
-- Group information
-- Failure reasons
+If CrossRef API is slow or fails:
+- **Provide an email**: Use `--config` with `crossref_email` set to your email for polite pool access
+- **Check network connection**: Ensure you have internet access
+- **Retry later**: CrossRef may have rate limits
 
-Use this log to manually create entries in JabRef using the citation keys provided.
+### GROBID Not Working
 
-#### Issue: GROBID service not available
-**Solution:** Start the GROBID Docker container:
-```bash
-docker run -t --rm -p 8070:8070 lfoppiano/grobid:0.8.0
-```
+If GROBID extraction fails:
+1. **Verify Docker is running**: `docker --version`
+2. **Check GROBID container**: `docker ps` (should show grobid container)
+3. **Test GROBID service**: `curl http://localhost:8070/api/isalive`
+4. **Check port**: Ensure port 8070 is available
 
-#### Issue: CrossRef API rate limiting
-**Solution:** Use the polite pool by setting your email in config.yaml:
-```yaml
-crossref_email: "your.email@example.com"
-```
+### Permission Issues
 
-#### Issue: Missing dependencies
-**Solution:** Install all required packages:
-```bash
-pip install -r requirements.txt
-```
-
-### Log Files
-
-#### Main Application Log
-
-All operations are logged to `pdf_citation_extractor.log`. Check this file for detailed error messages.
-
-```bash
-# View the log file
-tail -f pdf_citation_extractor.log
-
-# Filter for errors
-grep -i error pdf_citation_extractor.log
-```
-
-#### Failed Extractions Log
-
-When PDF metadata extraction fails, a detailed log file `failed_extractions.log` is automatically created in your output directory. This file helps you manually add missing citations to JabRef.
-
-```bash
-# Check for failed extractions
-cat output/failed_extractions.log
-
-# Or in your specified output directory
-cat my_output/failed_extractions.log
-```
-
-**Log File Contents:**
-- Timestamp of extraction
-- Output file reference
-- JabRef usage instructions
-- List of all failed files with:
-  - File path (relative to input directory)
-  - Group name (for JabRef organization)
-  - Would-be citation key (use this as the BibTeX key in JabRef)
-  - Failure reason
-  - Suggested action
-
-**Example Log Entry:**
-```
-## Failed File #1
-- **File**: papers/Conference2024/smith_paper.pdf
-- **Group**: Conference2024
-- **Would-be Citation Key**: smith_2024_Paper
-- **Reason**: No DOI found, no embedded metadata, GROBID unavailable
-- **Action**: Create entry manually in JabRef with key 'smith_2024_Paper'
-```
-
-**How to Use with JabRef:**
-1. Open your `.bib` file in JabRef
-2. For each failed file in the log, create a new entry
-3. Use the "Would-be Citation Key" as the entry's BibTeX key (ID field)
-4. Add the entry to the specified "Group"
-5. Save your `.bib` file
+If you get permission errors:
+- **On Linux/Mac**: Use `chmod` to make PDFs readable
+- **On Windows**: Run from elevated command prompt if needed
+- **Check directory permissions**: Ensure the tool can create output files
 
 ---
 
-## Tips and Best Practices
+## Best Practices
 
-### 1. Organize Your PDFs
+### Organizing Your PDFs
 
-Create a dedicated directory for your PDF collection:
-```bash
-mkdir -p ~/Documents/Research/Papers
-# Copy or move your PDFs here
-```
+1. **Use meaningful directory structure**: Organize by topic, project, or author
+2. **Use consistent naming**: Include author, year, and title in filenames when possible
+3. **Avoid special characters**: Use underscores or hyphens instead of spaces and special characters
 
-### 2. Process Incrementally
+### Using with JabRef
 
-Process new papers as you download them:
-```bash
-# Default behavior: automatically merges with existing file
-python -m src.main --pdf new_paper.pdf --output library.bib
+1. **Import the .bib file**: File → Import → BibTeX
+2. **Groups are preserved**: The tool generates JabRef group metadata
+3. **Manual entries**: Use the failed files log to create manual entries for problematic PDFs
+4. **Citation keys**: The tool generates citation keys automatically
 
-# The new citation will be added to library.bib without duplicates
-# No need to manually append!
-```
+### Regular Maintenance
 
-**Note:** By default, the extractor uses **merge mode**, which:
-- Preserves all existing entries in your `.bib` file
-- Only adds new citations
-- Prevents duplicates based on citation keys
-- Maintains JabRef group metadata
-
-To force overwrite (old behavior), use the `--overwrite` flag.
-
-### 3. Backup Your Config
-
-```bash
-cp config.yaml config.yaml.backup
-```
-
-### 4. Use Different Configs for Different Projects
-
-```bash
-# Create project-specific configs
-cp config.yaml project1_config.yaml
-cp config.yaml project2_config.yaml
-
-# Use the appropriate config for each project
-python -m src.main --dir ./project1 --config project1_config.yaml
-```
-
-### 5. Check Metadata Quality
-
-Some PDFs have better metadata than others. Check the quality:
-```python
-from pathlib import Path
-from src.extractors import PDFMetadataExtractor
-
-extractor = PDFMetadataExtractor()
-metadata = extractor.extract(Path("paper.pdf"))
-print(metadata)
-```
+1. **Clean up tracker**: Periodically run `--cleanup-tracker` to remove entries for deleted files
+2. **Check failed files log**: Review and manually add problematic PDFs
+3. **Update regularly**: Keep the tool updated for bug fixes and new features
 
 ---
 
-## Command Reference
+## Migration from v0.1.0 to v0.2.0
 
-### Full Command Line Options
+### What's New
 
-```
-Usage: python -m src.main [OPTIONS]
+1. **File Tracker**: New `.pdf_tracker.json` files will appear in your output directories
+2. **UUID field**: BibTeX entries now include `pdf_uuid` field for tracking
+3. **New CLI options**: `--show-tracker` and `--cleanup-tracker`
+4. **Improved merge**: Better handling of existing entries and duplicates
 
-  PDF Citation Metadata Extractor
+### What's Changed
 
-  Extracts citation metadata from PDF files and exports to reference
-  management formats.
+1. **Fallback citation keys**: Format changed from `Filename_Year` to just `Filename`
+2. **Group metadata**: JabRef groups are now generated as @Comment entries
+3. **Merge behavior**: UUID-based duplicate detection instead of just citation keys
 
-Options:
-  -d, --dir DIRECTORY       Directory containing PDF files to process
-  -p, --pdf PATH           Single PDF file to process
-  -o, --output PATH       Output file path (default: citations.bib)
-  -f, --format TEXT       Output format (default: bibtex)
-  -c, --config PATH       Path to config.yaml file
-  -v, --verbose            Enable verbose logging
-  --overwrite             Overwrite existing .bib file (default: merge with existing)
-  --help                  Show this message and exit.
-```
+### Backward Compatibility
 
-### Required Arguments
-
-You must specify **either** `--dir` **or** `--pdf`, but not both.
-
-### Examples
-
-```bash
-# Process a directory (default: merge with existing file)
-python -m src.main -d ./papers -o references.bib
-
-# Process a directory and overwrite existing file
-python -m src.main -d ./papers -o references.bib --overwrite
-
-# Process a single file
-python -m src.main -p paper.pdf -o paper.bib
-
-# Process with custom config
-python -m src.main -d ./papers -c my_config.yaml
-
-# Verbose mode
-python -m src.main -d ./papers -o refs.bib -v
-
-# Process to a specific output directory
-python -m src.main -d ./papers -o output/references.bib
-```
+- All existing functionality is preserved
+- New tracker files are created automatically
+- Old `.bib` files can still be read and updated
+- No changes required to existing workflows
 
 ---
 
-## Next Steps
+## Additional Resources
 
-1. **Install the tool** using the instructions above
-2. **Test with a sample PDF** to verify it works
-3. **Configure** your settings in `config.yaml`
-4. **Process your PDF collection**
-5. **Import the BibTeX** into your reference manager (Zotero, Mendeley, etc.)
+- [API Reference](API_REFERENCE.md) - Complete API documentation
+- [Source Code Documentation](SOURCE_CODE_DOCUMENTATION.md) - Detailed source code documentation
+- [Project README](../README.md) - Main project documentation
 
 ---
 
-*For detailed API documentation, see [SOURCE_CODE_DOCUMENTATION.md](./SOURCE_CODE_DOCUMENTATION.md)*
+## Support
+
+For issues, questions, or suggestions:
+- Check the [GitHub Issues](https://github.com/yourusername/pdf_citation_skimmer/issues)
+- Review this documentation
+- Enable verbose logging (`--verbose`) for detailed information
+
+---
+
+*Happy citing! 📚*
